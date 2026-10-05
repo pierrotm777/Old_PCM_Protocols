@@ -10,7 +10,7 @@ The purpose of the ESP32_S3/Atmega2560 work was to reconstruct a **Graupner SPCM
 
 1. Selected model
   For this project, I used a Graupner MC19 transmitter.  
-  ![](DOCS/MC19.png)
+  ![](DOCS/MC19.png)  
   This transmitter is capable of generating PPM or PCM signals.  
   The PCM signal—which is far superior to the PPM signal—supports two types of failsafe modes: holding the last position or moving to a programmed position on the first eight channels.  
   The transmitter supports 12 channels in PPM mode but only 10 channels in PCM mode.  
