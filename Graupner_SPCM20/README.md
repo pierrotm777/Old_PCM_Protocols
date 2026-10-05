@@ -12,7 +12,7 @@ The purpose of the ESP32_S3/Atmega2560 work was to reconstruct a **Graupner SPCM
   For this project, I used a Graupner MC19 transmitter.  
   ![](DOCS/MC19.png)  
   This transmitter is capable of generating PPM or PCM signals.  
-  The PCM signal—which is far superior to the PPM signal—supports two types of failsafe modes: holding the last position or moving to a programmed position on the first eight channels.  
+  The PCM signal, which is far superior to the PPM signal, supports two types of failsafe modes: holding the last position or moving to a programmed position on the first eight channels.  
   The transmitter supports 12 channels in PPM mode but only 10 channels in PCM mode.  
   The MC19 transmitter consists of two parts: a main board containing the microprocessor that controls the entire unit, and an RF board operating at 35, 41, or 72 MHz.  
   The RF module was often replaceable—a common feature in radios of this type, as frequencies varied from country to country.  
