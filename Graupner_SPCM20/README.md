@@ -25,7 +25,7 @@ The purpose of the ESP32_S3/Atmega2560 work was to reconstruct a **Graupner SPCM
 2. Logic analyzer:  
   ![](DOCS/logic_analyzer.png)  
   
-3. Regulated power supply
+3. Regulated power supply  
   Two power supply are used, one 10v and another 6v.  
    
 4. A RIGOL DS1102 oscilloscope
