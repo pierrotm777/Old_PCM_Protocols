@@ -4,7 +4,7 @@
 
 In the OpenAVRc group, we enjoy reusing RF modules from older transmitters—such as Futaba units for PPM or PCM1024, and Multiplex units for PPM or PCM. Graupner's PCM protocol is particularly complex; although it was analyzed in detail by [**Shaul Eizikovich** and **Michel Kuenemann**](DOCS/JR_GraupnerSPCM.pdf) in 2010, the structure of the final CRC byte remained unknown.  
 That is the subject of this project involving ChatGPT (GPT-5.6 Sol).  
-The purpose of the ESP32 work was to reconstruct a **Graupner SPCM20** signal compatible with a genuine Graupner RF module and its receivers, using a fully software-generated and instrumentable implementation.  
+The purpose of the ESP32_S3/Atmega2560 work was to reconstruct a **Graupner SPCM20** signal compatible with a genuine Graupner RF module and its receivers, using a fully software-generated and instrumentable implementation.  
 
 ## Resources deployed
 
