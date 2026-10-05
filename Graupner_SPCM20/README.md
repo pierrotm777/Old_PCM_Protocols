@@ -22,8 +22,7 @@ The purpose of the ESP32_S3/Atmega2560 work was to reconstruct a **Graupner SPCM
   La partie HF:  
   ![](DOCS/HF35Mhz.jpg)  
   
-2. Analyseur logique  
-  Logic analyzer:
+2. Logic analyzer:  
   ![](DOCS/logic_analyzer.png)  
   
 3. Regulated power supply
