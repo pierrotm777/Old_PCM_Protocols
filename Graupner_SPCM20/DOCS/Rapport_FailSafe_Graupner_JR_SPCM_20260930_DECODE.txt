@@ -1,0 +1,1004 @@
+RAPPORT TECHNIQUE — FAIL-SAFE GRAUPNER / JR SPCM 1024
+=========================================================
+Projet : Décodage et reproduction du SPCM 1024 de la Graupner MC-19
+Sujet  : Étude du Fail-Safe uniquement
+Date   : 30 septembre 2026
+État   : Analyse expérimentale en cours — structure partiellement décodée
+
+IMPORTANT
+---------
+Ce document est volontairement limité au mécanisme Fail-Safe observé dans les
+captures de la Graupner MC-19. Il distingue les faits mesurés des hypothèses.
+Aucun encodage Fail-Safe ne doit encore être ajouté au générateur ESP32 sur la
+base d'une hypothèse non confirmée.
+
+Le générateur SPCM normal (CH1..CH10, CRC, timing, codage physique) est traité
+dans les rapports généraux du projet et n'est rappelé ici que lorsqu'un élément
+est nécessaire pour comprendre le Fail-Safe.
+
+
+1. OBJECTIF DE L'ÉTUDE
+======================
+
+La Graupner MC-19 possède une fonction Fail-Safe en mode SPCM. L'objectif est
+de déterminer précisément ce que la radio transmet au module HF/récepteur
+lorsqu'une ou plusieurs voies sont configurées en Fail-Safe, afin de pouvoir
+éventuellement reproduire ce comportement avec l'ESP32-S3.
+
+Les questions principales sont :
+
+  1) Comment une voie est-elle marquée comme étant en Fail-Safe ?
+  2) Où la position mémorisée de Fail-Safe est-elle transportée ?
+  3) Cette position remplace-t-elle la valeur normale de la voie ?
+  4) Les champs AUX/service participent-ils au Fail-Safe ?
+  5) Quelle est la signification des valeurs 16, 20, 24, 28, 30, etc. ?
+  6) Le codage est-il absolu, relatif, ou constitué de mises à jour ?
+  7) Comment reproduire ce mécanisme sans perturber CH9/CH10, qui utilisent
+     eux aussi certains champs AUX ?
+
+
+2. BASE SPCM UTILE POUR LE FAIL-SAFE
+====================================
+
+Une trame logique SPCM contient 32 quintets de 5 bits.
+
+Les voies principales CH1..CH8 sont transportées sous forme de valeurs
+absolues de 10 bits :
+
+  CH1 = q16 * 32 + q17
+  CH2 = q1  * 32 + q2
+  CH3 = q19 * 32 + q20
+  CH4 = q4  * 32 + q5
+  CH5 = q24 * 32 + q25
+  CH6 = q9  * 32 + q10
+  CH7 = q27 * 32 + q28
+  CH8 = q12 * 32 + q13
+
+Les positions dites AUX dans notre analyse sont :
+
+  AUX1 = q0
+  AUX3 = q3
+  AUX5 = q8
+  AUX7 = q11
+  AUX2 = q18
+  AUX4 = q21
+  AUX6 = q26
+  AUX8 = q29
+
+Les quatre CTRL sont :
+
+  CTRL A = q6/q7
+  CTRL B = q14/q15
+  CTRL C = q22/q23
+  CTRL D = q30/q31
+
+Les CTRL contiennent notamment les CRC. Dans toutes les captures Fail-Safe
+analysées jusqu'ici, les deux bits hauts ("ctrlHigh") restent à 3. Le Fail-Safe
+observé n'est donc pas simplement signalé par un changement de ctrlHigh.
+
+
+3. MOTIF SERVICE DE RÉFÉRENCE
+=============================
+
+Avant l'étude détaillée du Fail-Safe, le cycle AUX/service validé sur la MC-19
+avait été identifié comme un cycle de huit trames :
+
+              AUX1 AUX3 AUX5 AUX7 AUX2 AUX4 AUX6 AUX8
+
+  phase 0 :      28   28   24   24    8    0   28   28
+  phase 1 :       8    0   28   28   16   16   16   16
+  phase 2 :      16   16   16   16    8    0   20   20
+  phase 3 :       8    0   20   20   20   20   24   24
+  phase 4 :      20   20   24   24    8    0   28   28
+  phase 5 :       8    0   28   28   24   24   16   16
+  phase 6 :      24   24   16   16    8    0   20   20
+  phase 7 :       8    0   20   20   28   28   24   24
+
+Suivant le point où débute une acquisition, ce cycle peut évidemment apparaître
+avec un décalage de phase.
+
+Les valeurs de base particulièrement importantes sont :
+
+  16 = 10000b
+  20 = 10100b
+  24 = 11000b
+  28 = 11100b
+
+Elles ont les deux bits faibles à zéro.
+
+L'étude Fail-Safe montre que ces champs ne sont pas de simples constantes :
+leurs bits faibles peuvent transporter des informations supplémentaires.
+
+
+4. INTERACTION AVEC CH9 ET CH10
+===============================
+
+L'étude du Fail-Safe doit impérativement tenir compte des voies supplémentaires.
+
+CH9 est une voie 8 bits transportée dans :
+
+  principal : AUX1/AUX3 = q0/q3
+  secours   : AUX5/AUX7 = q8/q11
+
+CH10 est une voie 8 bits transportée dans :
+
+  principal : AUX2/AUX4 = q18/q21
+  secours   : AUX6/AUX8 = q26/q29
+
+Une paire dont les valeurs sont inférieures à 16 peut donc contenir une voie
+supplémentaire et ne doit pas être confondue automatiquement avec une donnée
+Fail-Safe.
+
+Cette superposition explique une partie de la complexité des captures.
+
+
+5. CAPTURES UTILISÉES
+=====================
+
+Les acquisitions étudiées pendant cette session sont notamment :
+
+  failsafe_1234.csv
+      Fail-Safe configuré sur CH1 à CH4.
+
+  no_failsafe1234.csv
+      Capture témoin sans le même Fail-Safe CH1..CH4.
+
+  failsafe_1.csv
+      Fail-Safe sur CH1 uniquement.
+
+  failsafe_2.csv
+      Fail-Safe sur CH2 uniquement.
+
+  faisafe_1_1000.csv
+      CH1 avec une position Fail-Safe proche de 1000 µs.
+
+  failsafe_1_2000.csv
+      ATTENTION : cette capture a ensuite été identifiée par l'utilisateur
+      comme étant CH2 à 2000, et non CH1. Elle ne doit donc pas être utilisée
+      comme référence CH1=2000.
+
+  failsaf_1b_2000.csv
+      Nouvelle capture correcte : CH1 Fail-Safe à environ 2000 µs.
+
+  failsafe_1c_1500.csv
+      CH1 Fail-Safe à environ 1500 µs.
+
+  failsafe_1_1500-1000.csv
+      Fail-Safe CH1 mémorisé vers 1500 µs, mais position instantanée CH1
+      déplacée vers 1000 µs pendant la capture.
+
+  faisafe_1_1250environ.csv
+      CH1 Fail-Safe approximativement à 1250 µs.
+
+  failsafe_1_1750environ.csv
+      CH1 Fail-Safe approximativement à 1750 µs.
+
+  1-1000_2000.csv
+      Balayage continu de CH1 d'environ 1000 à 2000, utilisé pour observer
+      simultanément la valeur absolue CH1 et l'évolution des champs AUX.
+
+Les valeurs 1250 et 1750 sont approximatives : la MC-19 ne fournit pas à
+l'écran une mesure numérique exacte de la position utilisée pour ces essais.
+
+
+6. PREMIÈRE OBSERVATION : 28 -> 30
+==================================
+
+La comparaison entre la capture témoin et le Fail-Safe CH1..CH4 a révélé une
+modification très nette dans les champs AUX/service.
+
+Valeur normale :
+
+  28 = 11100b
+
+Valeur observée avec certains états Fail-Safe :
+
+  30 = 11110b
+
+La différence est :
+
+  28 -> 30
+  0x1C -> 0x1E
+
+soit l'activation du bit 0x02.
+
+Cette observation a d'abord fait penser à un indicateur global de Fail-Safe.
+Les captures par voie ont ensuite montré que cette interprétation était trop
+simple : la modification est associée à des champs correspondant à des voies
+individuelles.
+
+
+7. FAIL-SAFE CH1 SEUL
+=====================
+
+Avec CH1 seul configuré en Fail-Safe, une occurrence normalement observée à :
+
+  AUX1/AUX3 = 28/28
+
+devient :
+
+  AUX1/AUX3 = 30/28
+
+Le changement porte donc sur AUX1 et non sur AUX3.
+
+Cela constitue un premier lien expérimental entre CH1 et AUX1.
+
+
+8. FAIL-SAFE CH2 SEUL
+=====================
+
+Avec CH2 seul en Fail-Safe, la modification correspondante apparaît sur AUX2 :
+
+  AUX2 : 28 -> 30
+
+et non sur AUX1/AUX3 comme une hypothèse initiale l'avait envisagé.
+
+Les captures CH1 seul et CH2 seul conduisent donc à la correspondance
+expérimentale :
+
+  CH1 -> AUX1
+  CH2 -> AUX2
+
+La capture initiale CH1..CH4, dans laquelle AUX1/AUX3 et AUX2/AUX4 pouvaient
+tous présenter 30, est compatible avec la continuation suivante :
+
+  CH1 -> AUX1
+  CH2 -> AUX2
+  CH3 -> AUX3
+  CH4 -> AUX4
+
+Cependant, CH3 seul et CH4 seul n'ont pas été isolés dans les mesures décrites
+ici. La correspondance CH3->AUX3 et CH4->AUX4 reste donc une déduction très
+plausible, mais elle n'a pas le même niveau de validation expérimentale que
+CH1 et CH2.
+
+
+9. LA POSITION FAIL-SAFE NE REMPLACE PAS CH1
+============================================
+
+Une découverte essentielle est que la position Fail-Safe mémorisée n'est pas
+envoyée en remplaçant la valeur absolue normale de CH1.
+
+Dans les captures où une position Fail-Safe particulière est mémorisée, CH1
+continue à transporter la position instantanée de la commande dans q16/q17.
+
+Il existe donc au moins deux informations distinctes :
+
+  q16/q17 :
+      position instantanée de CH1
+
+  AUX/service :
+      informations liées à la programmation / position Fail-Safe
+
+Cela est fondamental pour l'implémentation future.
+
+
+10. TEST D'INDÉPENDANCE POSITION ACTUELLE / POSITION FS
+=======================================================
+
+Un test particulièrement important a été réalisé :
+
+  position Fail-Safe mémorisée CH1 : environ 1500 µs
+
+puis deux situations de position instantanée :
+
+  A) CH1 proche du neutre
+  B) CH1 déplacé vers environ 1000 µs
+
+Dans la seconde capture, la valeur absolue CH1 décodée descend à environ 170
+sur l'échelle SPCM, alors qu'elle était proche de 512 au neutre.
+
+Malgré ce déplacement important, le marqueur observé pour le Fail-Safe reste
+le même dans le passage concerné :
+
+  AUX1 = 30
+
+Conclusion expérimentale :
+
+  la donnée Fail-Safe n'est pas simplement l'écart entre la position actuelle
+  du manche et la position mémorisée.
+
+La position instantanée et l'information Fail-Safe sont indépendantes.
+
+
+11. POSITIONS FAIL-SAFE DE CH1
+==============================
+
+Plusieurs positions mémorisées ont été capturées afin d'étudier les valeurs
+AUX1.
+
+Les observations rapportées pendant l'analyse donnent notamment :
+
+CH1 Fail-Safe ~1000 µs
+----------------------
+
+Des valeurs particulières AUX1 ont été observées, notamment :
+
+  19 = 10011b
+  22 = 10110b
+  26 = 11010b
+
+Cette capture présente un entrelacement plus complexe avec les autres champs,
+et ne doit pas être réduite trop vite à un simple octet.
+
+CH1 Fail-Safe ~1250 µs
+----------------------
+
+Les quatre phases de base ont donné :
+
+  base 16 -> 17
+  base 20 -> 20
+  base 24 -> 25
+  base 28 -> 29
+
+Soit, après retrait de la base :
+
+  1, 0, 1, 1
+
+CH1 Fail-Safe ~1500 µs
+----------------------
+
+Un comportement particulièrement simple a été observé :
+
+  AUX1 = 30
+
+sur le passage correspondant.
+
+Le test avec CH1 instantané déplacé vers 1000 n'a pas modifié ce résultat.
+
+CH1 Fail-Safe ~1750 µs
+----------------------
+
+Les quatre phases rapportées ont donné :
+
+  base 16 -> 19
+  base 20 -> 23
+  base 24 -> 27
+  base 28 -> 30
+
+Soit :
+
+  3, 3, 3, 2
+
+CH1 Fail-Safe ~2000 µs
+----------------------
+
+La capture correcte est "failsaf_1b_2000.csv".
+
+Les valeurs observées sont :
+
+  base 16 -> 17
+  base 20 -> 21
+  base 24 -> 25
+  base 28 -> 31
+
+Soit :
+
+  1, 1, 1, 3
+
+ATTENTION :
+La première capture nommée "failsafe_1_2000.csv" correspondait en réalité à
+CH2=2000. Toute conclusion précédente l'utilisant comme CH1=2000 est invalide.
+
+
+12. STRUCTURE 4 x 2 BITS : OBSERVATION ET LIMITE
+================================================
+
+Les valeurs de base :
+
+  16 = 10000b
+  20 = 10100b
+  24 = 11000b
+  28 = 11100b
+
+laissent leurs deux bits faibles disponibles.
+
+Dans plusieurs captures, les valeurs modifiées peuvent être écrites :
+
+  base + donnée comprise entre 0 et 3
+
+Exemple ~2000 µs :
+
+  17 - 16 = 1
+  21 - 20 = 1
+  25 - 24 = 1
+  31 - 28 = 3
+
+Les quatre occurrences peuvent donc transporter quatre symboles de 2 bits,
+soit potentiellement 8 bits d'information.
+
+C'est une observation structurelle solide.
+
+En revanche, il serait prématuré de conclure que l'on obtient directement un
+octet Fail-Safe en concaténant naïvement ces quatre paires de bits dans l'ordre
+16,20,24,28.
+
+Les concaténations simples testées pendant l'étude ne donnent pas une grandeur
+évoluant linéairement avec 1000 -> 2000 µs.
+
+Il peut donc exister :
+
+  - une permutation de bits ;
+  - un ordre de transmission différent ;
+  - un codage différentiel ;
+  - un état de mise à jour ;
+  - un mélange entre information de position et information de service ;
+  - ou une combinaison de ces mécanismes.
+
+À ce stade, aucun de ces mécanismes ne doit être déclaré comme définitivement
+décodé.
+
+
+13. CAPTURE CONTINUE 1-1000_2000.csv
+====================================
+
+La capture "1-1000_2000.csv" est particulièrement importante, car CH1 a été
+balayé continûment d'environ 1000 à 2000.
+
+Environ 327 trames SPCM complètes ont été décodées dans l'analyse effectuée
+pendant la session, pour environ 329 synchros.
+
+La valeur absolue CH1 suit correctement le déplacement, avec une plage
+rapportée approximativement :
+
+  CH1 SPCM : 172 -> ... -> 511 -> ... -> 849
+
+Pendant ce déplacement, AUX1 évolue également.
+
+Au début de la capture, pour CH1 autour de 172, une séquence rapportée est :
+
+  23, 27, 30, 19, ...
+
+avec :
+
+  23 = 20 + 3
+  27 = 24 + 3
+  30 = 28 + 2
+  19 = 16 + 3
+
+Les deux bits faibles évoluent donc réellement avec l'état transmis.
+
+Pendant les déplacements, des valeurs AUX1 inférieures à 16 ont également été
+observées, par exemple dans l'analyse :
+
+  CH1=188 -> AUX1=4
+  CH1=196 -> AUX1=0
+  CH1=210 -> AUX1=30
+  CH1=226 -> AUX1=6
+  CH1=232 -> AUX1=4
+
+Ces observations montrent que le mécanisme complet ne se réduit pas à une
+table statique "position FS -> quatre valeurs 16..31".
+
+Cette capture contient probablement les informations les plus utiles pour
+reconstruire l'algorithme dynamique, car elle fournit simultanément :
+
+  - la position absolue CH1 ;
+  - l'évolution temporelle ;
+  - la valeur AUX1 ;
+  - les phases service ;
+  - les changements continus pendant le mouvement.
+
+
+14. HYPOTHÈSES ÉCARTÉES OU À CORRIGER
+=====================================
+
+Plusieurs hypothèses ont été formulées pendant l'étude puis invalidées ou
+affaiblies par les mesures suivantes.
+
+14.1 "30 est un indicateur global Fail-Safe"
+---------------------------------------------
+
+Écarté.
+
+CH1 seul agit sur AUX1 ; CH2 seul agit sur AUX2. Le mécanisme possède donc une
+composante par voie.
+
+14.2 "CH2 devrait modifier AUX3"
+---------------------------------
+
+Écarté par la capture CH2 seul.
+
+CH2 modifie AUX2.
+
+14.3 "Les champs AUX codent l'écart entre position actuelle et position FS"
+---------------------------------------------------------------------------
+
+Écarté par le test FS mémorisé à 1500 avec CH1 instantané déplacé vers 1000.
+
+Le marqueur Fail-Safe reste identique alors que la valeur absolue CH1 change
+fortement.
+
+14.4 "Quatre paires de 2 bits concaténées donnent directement l'octet FS"
+-------------------------------------------------------------------------
+
+Non démontré et probablement trop simpliste.
+
+La structure 4 x 2 bits est visible, mais l'ordre / la transformation n'est
+pas encore résolu.
+
+14.5 Première analyse "CH1=2000"
+--------------------------------
+
+À corriger.
+
+Le fichier "failsafe_1_2000.csv" était en réalité CH2=2000. La référence
+correcte CH1=2000 est "failsaf_1b_2000.csv".
+
+
+15. CE QUI EST ACTUELLEMENT DÉMONTRÉ
+====================================
+
+Les points suivants sont supportés directement par les captures analysées :
+
+  1) Le Fail-Safe modifie les champs AUX/service du flux SPCM.
+
+  2) CH1 et CH2 ont des champs Fail-Safe individualisés :
+       CH1 -> AUX1
+       CH2 -> AUX2
+
+  3) La valeur 28 peut devenir 30 selon l'état Fail-Safe.
+
+  4) Les valeurs de base 16/20/24/28 peuvent recevoir des données dans leurs
+     deux bits faibles.
+
+  5) Quatre phases peuvent ainsi transporter jusqu'à quatre symboles de
+     2 bits.
+
+  6) La position instantanée CH1 reste transmise normalement dans q16/q17.
+
+  7) La position Fail-Safe n'est donc pas simplement injectée à la place de
+     la valeur absolue de la voie.
+
+  8) Une position FS mémorisée à ~1500 conserve son information Fail-Safe
+     lorsque CH1 instantané est déplacé vers ~1000.
+
+  9) Le codage dynamique observé lors d'un balayage 1000->2000 est plus
+     complexe qu'un simple octet statique découpé en quatre morceaux.
+
+ 10) Les CTRL hauts restent à 3 dans les captures étudiées ; aucun indicateur
+     global simple n'y a été observé.
+
+ 11) Le décodage Fail-Safe doit être effectué en tenant compte du multiplexage
+     CH9/CH10 dans les AUX.
+
+
+16. CE QUI N'EST PAS ENCORE DÉMONTRÉ
+====================================
+
+Les points suivants restent ouverts :
+
+  - formule exacte position Fail-Safe -> données AUX ;
+  - ordre exact des bits ;
+  - éventuelle permutation des bits ;
+  - rôle exact des valeurs AUX <16 pendant une mise à jour ;
+  - différence exacte entre HOLD et position Fail-Safe dans le flux ;
+  - fréquence de répétition / rafraîchissement des informations Fail-Safe ;
+  - comportement lors d'une modification de programmation Fail-Safe en direct ;
+  - correspondance individuelle CH3->AUX3 et CH4->AUX4 par captures isolées ;
+  - éventuel mécanisme FS pour CH5..CH8 ;
+  - éventuel Fail-Safe propre à CH9/CH10 ;
+  - comportement du récepteur à la perte RF et moment exact où il applique
+    la position mémorisée ;
+  - nécessité éventuelle d'une séquence d'initialisation / apprentissage après
+    mise sous tension.
+
+
+17. CONSÉQUENCE POUR LE GÉNÉRATEUR ESP32
+========================================
+
+À ce stade, il est déconseillé d'ajouter un "Fail-Safe" approximatif dans la
+V8 du générateur.
+
+Le générateur actuel reproduit le fonctionnement SPCM normal validé. Modifier
+les valeurs AUX sans connaître complètement le mécanisme FS pourrait :
+
+  - perturber les informations de service ;
+  - perturber CH9 ;
+  - perturber CH10 ;
+  - programmer une position FS erronée dans le récepteur ;
+  - produire un comportement dangereux lors d'une perte de liaison.
+
+La bonne stratégie est donc :
+
+  A) conserver la V8 actuelle comme référence de transmission normale ;
+  B) terminer le décodage du mécanisme FS ;
+  C) seulement ensuite ajouter une API Fail-Safe.
+
+
+18. API ENVISAGEABLE APRÈS DÉCODAGE
+===================================
+
+Une fois le protocole complètement compris, une interface de bibliothèque
+pourrait par exemple proposer :
+
+  setFailsafeUs(channel, pulse_us)
+  setFailsafeHold(channel)
+  disableFailsafe(channel)
+
+ou, dans une API RCUL intégrée, un mécanisme équivalent.
+
+Ces noms sont seulement des propositions d'interface. Ils ne décrivent pas
+encore un protocole suffisamment connu pour être implémenté.
+
+
+19. PROCHAINE ANALYSE RECOMMANDÉE
+=================================
+
+La capture "1-1000_2000.csv" doit maintenant être exploitée de façon
+systématique, trame par trame.
+
+Pour chaque trame, il faut construire un tableau contenant au minimum :
+
+  numéro de trame
+  phase dans le cycle de 8
+  CH1 absolu
+  AUX1
+  AUX3
+  AUX5
+  AUX7
+  CH9 éventuel
+  base service reconnue
+  deux bits faibles
+  différence avec la trame précédente
+
+Puis rechercher les corrélations entre :
+
+  variation de CH1
+  variation des deux bits faibles
+  changement de phase
+  apparition des valeurs AUX <16
+  répétition de séquences
+
+Il faudra notamment tester mathématiquement :
+
+  - permutation des 8 bits ;
+  - ordre MSB/LSB ;
+  - Gray code ;
+  - valeur signée ;
+  - delta entre deux états Fail-Safe successifs ;
+  - delta entre valeur FS et une référence fixe ;
+  - compteur / numéro de phase incorporé ;
+  - mécanisme de mise à jour relative.
+
+Une hypothèse ne devra être retenue que si elle explique simultanément les
+captures ~1000, ~1250, 1500, ~1750, 2000 et le balayage continu.
+
+
+20. POINT DE REPRISE POUR UNE FUTURE SESSION
+============================================
+
+Si cette étude est reprise dans une autre conversation, voici le minimum à
+conserver :
+
+  - SPCM = 32 quintets de 5 bits.
+  - CH1 = q16/q17.
+  - AUX1=q0, AUX3=q3, AUX5=q8, AUX7=q11.
+  - AUX2=q18, AUX4=q21, AUX6=q26, AUX8=q29.
+  - Service de base utilise notamment 16/20/24/28.
+  - Les deux bits faibles de ces valeurs sont utilisés pendant le Fail-Safe.
+  - CH1 FS agit sur AUX1.
+  - CH2 FS agit sur AUX2.
+  - 28 peut devenir 30.
+  - CH1 instantané et position FS sont indépendants.
+  - CH1 FS ~1500 reste marqué de la même façon lorsque CH1 instantané est
+    déplacé vers ~1000.
+  - CH1 FS ~2000 correct : 17/21/25/31 sur les quatre bases observées.
+  - La première capture appelée CH1=2000 était en réalité CH2=2000.
+  - Les champs AUX sont aussi utilisés par CH9/CH10.
+  - La capture "1-1000_2000.csv" est la meilleure source pour poursuivre
+    l'analyse dynamique.
+  - Ne pas implémenter encore un Fail-Safe approximatif dans V8.
+
+
+21. CONCLUSION
+==============
+
+L'étude a démontré que le Fail-Safe SPCM de la MC-19 est réellement transporté
+dans les champs AUX/service et qu'il possède une composante individualisée par
+voie.
+
+Les valeurs 16, 20, 24 et 28 ne sont pas de simples constantes : leurs deux
+bits faibles peuvent transporter des données. Plusieurs positions Fail-Safe de
+CH1 produisent des motifs différents, et le test avec CH1 instantané déplacé
+montre que l'information FS est distincte de la position instantanée.
+
+La structure observée est compatible avec quatre symboles de deux bits, mais
+l'algorithme complet n'est pas encore suffisamment déterminé pour générer un
+Fail-Safe fidèle.
+
+La capture continue 1-1000_2000.csv constitue désormais la source principale
+pour la prochaine étape : reconstruire la transformation exacte entre la
+programmation Fail-Safe et les valeurs AUX émises.
+
+État recommandé du projet à la fin de ce rapport :
+
+  Transmission SPCM normale : validée.
+  CH9 : validé matériellement.
+  CH10 : décodé et implémenté, fallback confirmé par capture.
+  Fail-Safe : mécanisme localisé et structure partiellement comprise,
+              algorithme exact encore à décoder.
+  V8 : à conserver inchangée concernant le Fail-Safe jusqu'à résolution.
+
+FIN DU RAPPORT
+==============
+
+
+===============================================================================
+22. MISE À JOUR — DÉCODAGE EXACT DU FAIL-SAFE
+===============================================================================
+
+Cette section remplace les hypothèses devenues obsolètes dans les sections
+précédentes. Elle résulte de la confrontation des captures MC-19 avec la
+description publiée du format JR/Graupner SPCM.
+
+22.1 Signification exacte d'un champ AUX
+----------------------------------------
+
+Le sens d'un quintet AUX dépend de deux informations :
+
+  - son bit de contrôle, situé dans CTRL A/B/C/D ;
+  - le bit 4 (MSB) du quintet AUX.
+
+La combinaison est :
+
+  Ctrl = 0             -> Relative Channel Data
+  Ctrl = 1, AUX[4] = 0 -> Extra Channel Data (CH9/CH10)
+  Ctrl = 1, AUX[4] = 1 -> Fail-Safe Data
+
+Cela explique les trois usages observés sur les mêmes emplacements AUX.
+
+22.2 Format exact d'un quintet Fail-Safe
+----------------------------------------
+
+Une consigne Fail-Safe est une valeur 10 bits :
+
+  FS9 FS8 FS7 FS6 FS5 FS4 FS3 FS2 0 0
+
+Les deux bits faibles FS1 et FS0 ne sont pas transmis et sont supposés nuls.
+
+Le quintet AUX Fail-Safe est :
+
+  AUX[4]   = 1
+  AUX[3:2] = index 0..3
+  AUX[1:0] = morceau de deux bits de la valeur FS
+
+Correspondance :
+
+  index 0 -> FS3:FS2
+  index 1 -> FS5:FS4
+  index 2 -> FS7:FS6
+  index 3 -> FS9:FS8
+
+Ainsi les bases :
+
+  16 = 10000b -> index 0
+  20 = 10100b -> index 1
+  24 = 11000b -> index 2
+  28 = 11100b -> index 3
+
+sont précisément les quatre index Fail-Safe avec les deux bits de données à 0.
+
+22.3 Reconstruction d'une valeur FS
+-----------------------------------
+
+Pour quatre quintets appartenant à la même voie :
+
+  p0 = AUX(index0) & 3
+  p1 = AUX(index1) & 3
+  p2 = AUX(index2) & 3
+  p3 = AUX(index3) & 3
+
+la valeur Fail-Safe est :
+
+  FS = (p0 << 2)
+     | (p1 << 4)
+     | (p2 << 6)
+     | (p3 << 8)
+
+Les bits 1..0 restent à zéro.
+
+22.4 Validation par les captures CH1
+------------------------------------
+
+Les captures donnent :
+
+  ~1000 : 19,22,26,28
+  ~1250 : 17,20,25,29
+   1500 : 16,20,24,30
+  ~1750 : 19,23,27,30
+  ~2000 : 17,21,25,31
+
+Reconstruction :
+
+  ~1000 :
+    19&3=3, 22&3=2, 26&3=2, 28&3=0
+    FS = 3<<2 | 2<<4 | 2<<6 | 0<<8
+       = 172
+
+  ~1250 :
+    1,0,1,1
+    FS = 324
+
+  1500 :
+    0,0,0,2
+    FS = 512
+
+  ~1750 :
+    3,3,3,2
+    FS = 764
+
+  ~2000 :
+    1,1,1,3
+    FS = 852
+
+La progression 172,324,512,764,852 est cohérente avec les positions physiques
+approximatives utilisées sur la MC-19.
+
+22.5 Cas spécial FS=0
+---------------------
+
+La valeur Fail-Safe 0 est réservée :
+
+  FS = 0 -> Fail-Safe désactivé / maintien de la valeur courante (HOLD).
+
+Le motif Service normal 16/20/24/28 avec bits bas à zéro transmet donc
+naturellement une valeur FS nulle.
+
+22.6 Validation CH1 / CH2
+-------------------------
+
+Les captures individuelles confirment :
+
+  CH1 -> AUX1
+  CH2 -> AUX2
+
+et les captures CH1..CH4 sont cohérentes avec :
+
+  CH1 -> AUX1
+  CH2 -> AUX2
+  CH3 -> AUX3
+  CH4 -> AUX4
+
+La structure générale du format associe de la même façon :
+
+  CH5 -> AUX5
+  CH6 -> AUX6
+  CH7 -> AUX7
+  CH8 -> AUX8
+
+22.7 Correction de l'analyse du balayage 1000->2000
+---------------------------------------------------
+
+Les valeurs AUX inférieures à 16 observées pendant le déplacement rapide de
+CH1 ne sont pas des fragments Fail-Safe.
+
+Lorsque ces valeurs apparaissent, le bit de contrôle correspondant sélectionne
+le mode "Relative Channel Data".
+
+Le format relatif est :
+
+  AUX[0]   = polarité
+             0 = delta positif
+             1 = delta négatif
+
+  AUX[4:1] = index d'une plage de delta
+
+Le récepteur utilise cette information entre deux transmissions absolues pour
+améliorer la fréquence de mise à jour d'une voie en mouvement.
+
+Cette découverte explique les valeurs 0,2,4,6... observées pendant le balayage
+et retire une ambiguïté importante de l'étude Fail-Safe.
+
+22.8 CH9/CH10 et Fail-Safe
+--------------------------
+
+CH9/CH10 utilisent les mêmes emplacements AUX que le FS et les données
+relatives.
+
+CH9 :
+  principal : AUX1 + AUX3
+  secours   : AUX5 + AUX7
+
+CH10 :
+  principal : AUX2 + AUX4
+  secours   : AUX6 + AUX8
+
+Les voies supplémentaires et les données FS sont normalement multiplexées.
+Le secours CH9/CH10 est particulièrement nécessaire lorsqu'un AUX primaire est
+réquisitionné par une mise à jour relative d'une voie CH1..CH4.
+
+Il ne faut donc pas écraser systématiquement un AUX de secours contenant une
+donnée Fail-Safe simplement parce que le créneau primaire n'est pas un créneau
+CH9/CH10.
+
+22.9 Algorithme d'encodage
+--------------------------
+
+Pour une consigne FS 10 bits "fs" :
+
+  fs &= 0x03FC;
+
+Pour l'index i = 0..3 :
+
+  part = (fs >> (2 + 2*i)) & 0x03;
+  aux  = 0x10 | (i << 2) | part;
+
+Exemple FS=512 (0x200) :
+
+  index0 -> 16
+  index1 -> 20
+  index2 -> 24
+  index3 -> 30
+
+ce qui correspond exactement à la capture MC-19 à 1500 environ.
+
+22.10 État de compréhension après cette mise à jour
+---------------------------------------------------
+
+DÉCODÉ / VALIDÉ :
+
+  - distinction Relative / Extra / Fail-Safe par Ctrl + AUX[4] ;
+  - format des quatre fragments Fail-Safe ;
+  - reconstruction de la valeur FS 10 bits ;
+  - bits FS1..FS0 forcés à zéro ;
+  - FS=0 signifie désactivé/HOLD ;
+  - CH1->AUX1 et CH2->AUX2 confirmés expérimentalement ;
+  - cohérence des captures ~1000/~1250/1500/~1750/~2000 ;
+  - explication des AUX <16 du balayage comme données relatives.
+
+RESTE À TESTER SUR LE MATÉRIEL :
+
+  - génération ESP32 d'une consigne FS et mémorisation correcte par le
+    récepteur ;
+  - CH3..CH8 individuellement si l'on veut une validation expérimentale
+    exhaustive ;
+  - comportement réel du récepteur après coupure de l'émetteur ;
+  - interaction complète avec les mises à jour relatives lorsque CH9/CH10
+    doivent utiliser leurs AUX de secours.
+
+===============================================================================
+23. V9 EXPÉRIMENTALE
+===============================================================================
+
+Une V9 du sketch de test a été préparée avec :
+
+  - table Service corrigée ;
+  - Fail-Safe CH1..CH8 ;
+  - FS désactivé par défaut ;
+  - FS=0 = HOLD/OFF ;
+  - génération des quatre fragments FS dans les créneaux Service ;
+  - CH9/CH10 conservés dans leurs créneaux primaires programmés ;
+  - suppression du fallback systématique de la V8, qui pouvait écraser une
+    donnée FS valide dans un AUX de secours.
+
+Commandes console ajoutées :
+
+  FS1 1000   -> position Fail-Safe CH1
+  FS8 1750   -> position Fail-Safe CH8
+  FH1        -> Fail-Safe CH1 désactivé / HOLD
+  FHA        -> Fail-Safe CH1..CH8 désactivé / HOLD
+
+La V9 ne génère pas encore les mises à jour relatives. En conséquence, elle
+n'a pas besoin d'utiliser les AUX de secours CH9/CH10 pour ce cas.
+
+Le moteur physique, le timing, la conversion physique et les CRC restent ceux
+de la base précédemment validée.
+
+===============================================================================
+24. NOUVELLE CONCLUSION
+===============================================================================
+
+Le codage de la VALEUR Fail-Safe SPCM CH1..CH8 est maintenant décodé.
+
+La prochaine validation utile n'est plus une nouvelle recherche de format,
+mais un essai réel du générateur V9 :
+
+  1) programmer par exemple FS1 1000 ;
+  2) laisser CH1 instantané à une autre position ;
+  3) vérifier le flux à l'analyseur si souhaité ;
+  4) tester avec le récepteur ;
+  5) couper l'émission et observer si le servo CH1 prend la position FS.
+
+Cette validation doit être réalisée prudemment, sans moteur ni mécanisme
+susceptible de provoquer un mouvement dangereux.

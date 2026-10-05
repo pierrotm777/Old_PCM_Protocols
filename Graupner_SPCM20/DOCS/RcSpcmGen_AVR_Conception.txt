@@ -1,0 +1,259 @@
+RcSpcmGen – Note de conception du backend AVR
+
+Version de référence étudiée : RcSpcmGen 0.4.14 Cible principale testée
+: ATmega328P / Arduino Uno Cible prévue également : ATmega2560 /
+OpenAVRc
+
+1. But
+
+Le backend AVR a été créé pour produire le même flux Graupner/JR SPCM
+1024 que le générateur déjà mis au point sur ESP32, mais sans dépendre
+de micros() ou de temporisations actives dans une boucle.
+
+L’objectif principal était d’obtenir des fronts SPCM précis et
+reproductibles sur un AVR 16 MHz, avec une charge CPU raisonnable et un
+fonctionnement compatible avec l’architecture Timer1 utilisée dans
+OpenAVRc.
+
+Le codage logique SPCM reste commun aux plateformes : - construction des
+32 quintets ; - placement des voies ; - table quintet -> octet physique
+; - Service/AUX ; - CRC ; - Fail-Safe.
+
+Le backend AVR ne doit donc s’occuper que de la génération temporelle du
+signal physique.
+
+2. Pourquoi Timer1 et OC1B
+
+Les premières versions AVR généraient les fronts depuis le logiciel. Les
+captures à l’analyseur logique ont montré qu’il était possible d’obtenir
+une période correcte, mais avec davantage de dispersion sur les fronts
+internes.
+
+La solution retenue utilise donc la sortie matérielle OC1B de Timer1 :
+
+-   ATmega328P : PB2 / OC1B / Arduino D10
+-   ATmega2560 : PB6 / OC1B / Arduino D12
+
+Timer1 fonctionne en mode normal avec un prescaler /8.
+
+À 16 MHz :
+
+    Ftimer = 16 MHz / 8 = 2 MHz
+    1 count Timer1 = 0,5 us
+
+Le matériel AVR bascule directement OC1B lorsque TCNT1 atteint OCR1B.
+L’ISR ne génère donc pas elle-même le front : elle programme uniquement
+la date du front suivant.
+
+C’est le principe important du backend AVR : la latence de l’ISR ne
+décale pas le front déjà programmé.
+
+3. Programmation relative de OCR1B
+
+Le prochain événement est programmé par :
+
+    OCR1B += nombre_de_counts
+
+et non à partir de la valeur courante de TCNT1.
+
+Cette méthode conserve la chronologie théorique des fronts même si
+l’entrée dans l’ISR varie légèrement.
+
+Cette approche est également proche du principe employé par le
+générateur PCM d’OpenAVRc sur ATmega2560.
+
+4. Tick SPCM de 166,4 us
+
+Un tick SPCM vaut environ 166,4 us.
+
+À 2 MHz cela représente :
+
+    166,4 us / 0,5 us = 332,8 counts
+
+Comme Timer1 ne peut programmer qu’un nombre entier de counts, le code
+utilise un accumulateur fractionnaire.
+
+Il alterne les durées entières nécessaires (332/333 counts selon
+l’accumulation) afin que la moyenne à long terme corresponde à 166,4 us.
+
+Les variables principales sont :
+
+    _AvrTickBase
+    _AvrTickRem
+    _AvrTickFrac
+
+La fonction avrNextTickCounts() effectue cette accumulation.
+
+5. Trame physique compacte
+
+Une trame physique SPCM contient 256 bits.
+
+Pour économiser la SRAM de l’ATmega328P, elle est stockée sous forme
+compacte :
+
+    256 bits = 32 octets
+
+Deux buffers de 32 octets sont utilisés :
+
+    _AvrBits[2][32]
+
+Un buffer est transmis pendant que l’autre peut être préparé.
+
+Ce double buffering évite de reconstruire toute la trame à l’intérieur
+de l’ISR.
+
+Les versions AVR précédentes utilisant des tables d’événements plus
+importantes consommaient trop de SRAM pour l’ATmega328P ; cette
+représentation compacte a donc été retenue.
+
+6. Machine d’états de l’ISR
+
+L’ISR Timer1 fonctionne comme une petite machine d’états.
+
+Phase 0 : fin du SYNC et recherche du premier bit physique à 1.
+
+Phase 1 : un front correspondant à un bit physique à 1 vient d’être
+généré ; recherche du prochain bit à 1.
+
+Phase 2 : gestion du front supplémentaire de parité lorsque nécessaire.
+
+Phase 3 : fin de la partie données, arrivée au tick 260 et calcul du
+repos restant jusqu’à la prochaine trame.
+
+Phase 4 : début du SYNC de la trame suivante, échange éventuel des deux
+buffers et programmation de la fin du SYNC.
+
+Le matériel OC1B produit les fronts ; l’ISR ne fait que calculer et
+charger les prochains instants dans OCR1B.
+
+7. SYNC et période de trame
+
+Le SYNC est programmé autour de 415 us.
+
+La période finale a été réglée à partir des mesures faites à l’analyseur
+logique.
+
+La version 0.4.13 donnait environ :
+
+    44,092 ms
+
+La version 0.4.14 retire 67 us uniquement au repos de fin de trame AVR.
+
+Les mesures obtenues avec la 0.4.14 sont alors proches de :
+
+    période = 44,025 ms
+    SYNC    = ~414 us
+
+Cette correction ne modifie ni les ticks de données, ni le Service/AUX,
+ni le CRC, ni le Fail-Safe.
+
+8. Construction des données hors ISR
+
+avrPrepareFrame() construit une nouvelle trame dans le buffer en
+attente.
+
+Lorsque la trame courante est terminée, l’ISR échange les buffers si
+_AvrPendingReady est positionné.
+
+Cela sépare volontairement : - le calcul relativement lourd de la trame
+SPCM ; - la génération temporelle des fronts.
+
+L’ISR reste ainsi principalement un ordonnanceur de fronts Timer1.
+
+9. Pourquoi OC1B est imposé
+
+Dans le backend AVR actuel, la broche n’est pas arbitraire.
+
+Elle doit être OC1B :
+
+    Uno / ATmega328P  : D10
+    Mega / ATmega2560 : D12
+
+Ce choix permet au périphérique Timer1 de générer physiquement les
+transitions sans dépendre du temps d’exécution du code Arduino.
+
+10. Interaction avec RCUL
+
+La bibliothèque dérive directement de Rcul.
+
+L’interface RCUL reste commune au backend ESP32 et au backend AVR :
+
+    RculIsSynchro()
+    RculGetWidth_us()
+    RculSetWidth_us()
+
+Les valeurs de voies restent exprimées en microsecondes pour
+l’utilisateur de la bibliothèque. La construction SPCM se charge ensuite
+de leur conversion interne.
+
+11. Validation expérimentale AVR
+
+Avec la version 0.4.14, les captures réalisées sur l’Uno montrent une
+période très stable autour de 44,025 ms.
+
+Les essais réels ont également montré : - commandes de voie reçues par
+le récepteur ; - programmation et déclenchement du Fail-Safe ; - reprise
+des commandes après retour du HF.
+
+Un problème important rencontré pendant les essais provenait de
+l’alimentation auxiliaire du module HF et non du timing AVR : lorsque
+cette alimentation autorisait environ 60 mA, une composante RF proche de
+35 MHz devenait beaucoup plus visible sur le signal SPCM et le
+comportement du récepteur devenait erratique. Avec une limitation à
+environ 20 mA, le fonctionnement est devenu nettement plus
+reproductible.
+
+Ce point appartient au montage électrique du banc d’essai et non au
+backend Timer1 lui-même.
+
+12. Points pouvant être nettoyés plus tard
+
+La version 0.4.14 fonctionne et il est préférable de conserver cette
+version comme référence avant toute refactorisation.
+
+Quelques nettoyages sont néanmoins possibles dans une version ultérieure
+: - mettre à jour certains commentaires historiques mentionnant encore
+la v0.4.11 ; - clarifier les noms des phases de la machine d’états ; -
+isoler davantage le backend AVR dans une section/fichier dédié ; -
+documenter explicitement le conflit Timer1 avec Servo et les autres
+bibliothèques utilisant Timer1 ; - supprimer les éléments AVR devenus
+inutiles uniquement après vérification qu’ils ne servent plus au
+démarrage ou à l’arrêt ; - conserver une version de référence inchangée
+avant tout nettoyage.
+
+Il ne faut pas optimiser l’ISR ou remplacer l’accumulateur fractionnaire
+sans refaire une capture complète à l’analyseur logique.
+
+13. Point important concernant ESP32
+
+Le moteur temporel ESP32 n’a pas été remplacé par le backend AVR : les
+blocs AVR sont protégés par ARDUINO_ARCH_AVR.
+
+Cependant, entre les versions 0.4.11 et 0.4.14, une modification commune
+à toutes les plateformes a été faite dans usToSpcm() : l’échelle de
+conversion des voies a été changée.
+
+Par conséquent, il serait incorrect de dire que le comportement ESP32 de
+la 0.4.14 est strictement identique à celui de la 0.4.11.
+
+Le moteur temporel ESP32 est resté le même, mais une partie du codage
+logique commun a changé.
+
+Avant de déclarer une version finale AVR + ESP32, il faudra décider
+quelle conversion usToSpcm() doit être conservée et, si nécessaire,
+séparer explicitement la conversion des voies normales de celle du
+Fail-Safe.
+
+14. Référence actuelle
+
+Pour le backend AVR, la base expérimentale actuelle est :
+
+    RcSpcmGen 0.4.14
+    Timer1 prescaler /8
+    OC1B matériel
+    Uno D10 / Mega2560 D12
+    période mesurée ~44,025 ms
+    SYNC ~414 us
+
+Cette version doit être conservée telle quelle comme référence avant
+nettoyage.

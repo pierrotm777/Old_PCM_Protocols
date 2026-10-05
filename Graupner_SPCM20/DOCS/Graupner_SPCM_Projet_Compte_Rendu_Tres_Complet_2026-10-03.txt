@@ -1,0 +1,953 @@
+Graupner / JR SPCM 1024 — Compte rendu complet du banc Protothreads /
+OpenAVRc
+
+Date de reprise : 2026-10-03
+
+OBJECTIF DE CE FICHIER
+
+Ce document est destiné à être fourni tel quel dans un nouveau chat afin
+de reprendre le travail sans perdre l’historique technique.
+
+Le but du projet est de comprendre, générer et valider le protocole
+Graupner/JR SPCM 1024, puis de permettre son intégration dans OpenAVRc.
+Le travail Protothreads présenté ici est un banc d’essai Arduino UNO
+reproduisant autant que possible l’architecture PCM générique déjà
+présente dans OpenAVRc.
+
+Le code final OpenAVRc n’est pas encore écrit ici. Le banc UNO sert de
+référence validée pour que le collègue de l’utilisateur, qui a déjà
+réalisé le PCM Futaba 1024 et le PCM Multiplex dans OpenAVRc, puisse
+reprendre la logique Graupner.
+
+IMPORTANT : la branche de référence actuelle pour le moteur Protothreads
+est V10.7b. V10.8 est une expérience supplémentaire de démarrage
+destinée à imiter un comportement observé sur la MC-19. Ne pas supprimer
+V10.7b.
+
+1.  REFERENCE OPENAVRc ET ARCHITECTURE PROTOTHREADS
+
+Les fichiers OpenAVRc étudiés sont PROTO_PCM.h et PROTO_PCM.cpp.
+
+Le collègue de l’utilisateur a expliqué le principe de son moteur PCM :
+
+1)  Construire la trame en interruption avec les Protothreads.
+2)  Construire un train de bits/durées à émettre.
+3)  Utiliser deux buffers :
+    -   un buffer actuellement émis par l’ISR ;
+    -   un buffer dans lequel la trame suivante est construite.
+4)  A la fin d’une trame, échanger les buffers.
+5)  L’ISR Timer1 programme les durées successives avec OCR1B.
+6)  Le moteur PCM est commun aux PCM Futaba, Multiplex et, en principe,
+    Graupner/JR.
+
+Dans PROTO_PCM.h on trouve notamment les périodes : -
+FUT_PCM1024_FRAME_PERIOD_US = 28500 us - GRA_PCM1024_FRAME_PERIOD_US =
+44000 us - MPX_PCM256_FRAME_PERIOD_US = 57000 us
+
+Le type de constructeur est de la forme : typedef
+PT_THREAD((BuildRadioPcmBitStreamPtr)(struct pt ));
+
+La structure PCM contient notamment : - le pointeur vers le builder ; -
+les durées ; - deux tableaux StreamConsecBitTbl[2][…]; - un contexte
+PtCtx persistant.
+
+POINT CRITIQUE PROTOTHREADS : Les variables locales automatiques d’une
+fonction Protothread ne sont PAS fiables au travers d’un PT_YIELD /
+PT_WAIT. Toute donnée nécessaire après un yield doit être stockée dans
+une structure persistante, ici PtCtx.
+
+Cette règle a provoqué plusieurs des échecs des premières versions du
+banc UNO.
+
+2.  REPRESENTATION DU FLUX DANS LE MOTEUR OPENAVRc
+
+Le moteur PCM OpenAVRc ne stocke pas simplement 256 bits SPCM.
+
+Il transforme le signal en une suite de durées entre transitions. Les
+durées sont codées dans des nibbles, deux durées par octet. Le moteur
+historique dispose de 44 octets, donc jusqu’à 88 durées.
+
+L’ISR : - lit la prochaine durée ; - programme OCR1B relativement à la
+précédente échéance ; - le matériel Timer1 bascule OC1B ; - à la fin du
+buffer, échange les buffers et poursuit avec la trame suivante.
+
+Principe important : OCR1B += durée et non : OCR1B = TCNT1 + durée
+
+Cela évite d’accumuler la latence de l’ISR dans le timing du signal.
+
+Sur Arduino UNO / ATmega328P : - Timer1 - prescaler /8 - horloge CPU 16
+MHz - Timer1 = 2 MHz - 1 count = 0,5 us - sortie matérielle OC1B = PB2 =
+Arduino D10.
+
+Sur ATmega2560 / OpenAVRc : - OC1B = PB6 = Arduino Mega D12.
+
+Le banc UNO utilise donc D10 pour reproduire le principe OpenAVRc.
+
+3.  STRUCTURE LOGIQUE SPCM 1024
+
+Une trame logique comporte 32 quintets de 5 bits, répartis en quatre
+groupes de 8 quintets.
+
+Chaque groupe : - 6 quintets de données = 30 bits ; - 2 quintets = CTRL
+10 bits.
+
+Les 8 bits faibles de CTRL sont un CRC / contrôle calculé sur : - les
+six quintets = 30 bits ; - les deux bits de poids fort de CTRL ; soit 32
+bits protégés.
+
+Polynômes CRC validés sur la capture MC-19 : - groupe A : 0x31 - groupe
+B : 0x13 - groupe C : 0x91 - groupe D : 0x19
+
+CRC : - MSB first - init = 0x00 - xorout = 0x00
+
+Fonction de référence :
+
+uint8_t spcmCrc8(const uint8_t data[4], uint8_t poly) { uint8_t crc = 0;
+for (uint8_t n=0; n<4; n++) { crc ^= data[n]; for (uint8_t bit=0; bit<8;
+bit++) { if (crc & 0x80) crc = (uint8_t)((crc << 1) ^ poly); else crc
+<<= 1; } } return crc; }
+
+Les quatre CTRL sont reconstruits ainsi : ctrl = ((ctrlHigh & 3) << 8) |
+crc
+
+Puis : qHi = (ctrl >> 5) & 0x1F qLo = ctrl & 0x1F
+
+La vérification initiale sur la capture originale a donné 543 trames x 4
+groupes = 2172 contrôles corrects.
+
+4.  TABLE QUINTET -> MOT PHYSIQUE
+
+Table inverse validée utilisée pour générer le signal :
+
+static const uint8_t QuintetToPhysical[32] = {
+0x01,0x44,0x50,0x48,0x14,0x24,0x54,0x28,
+0x0A,0x42,0x09,0x41,0x12,0x22,0x11,0x21,
+0x02,0x04,0x40,0x20,0x51,0x08,0x52,0x10,
+0x45,0x25,0x05,0x15,0x49,0x29,0x4A,0x2A };
+
+Une ancienne transcription contenait une erreur 0x0B à la place de 0x0A.
+La correction a permis de valider les captures.
+
+5.  MAPPING DES VOIES
+
+Canaux 10 bits principaux : - CH1 = q16 * 32 + q17 - CH2 = q1 * 32 +
+q2 - CH3 = q19 * 32 + q20 - CH4 = q4 * 32 + q5 - CH5 = q24 * 32 + q25 -
+CH6 = q9 * 32 + q10 - CH7 = q27 * 32 + q28 - CH8 = q12 * 32 + q13
+
+CTRL : - A = q6/q7 - B = q14/q15 - C = q22/q23 - D = q30/q31
+
+CH9 a été validé matériellement : - voie 8 bits multiplexée AUX1/AUX3
+; - q0 = nibble haut ; - q3 = nibble bas.
+
+CH10 : - AUX2/AUX4 = q18/q21 ; - fallback AUX6/AUX8 = q26/q29 si les
+premiers sont occupés. CH10 n’a pas été validé directement sur une
+sortie physique car le récepteur utilisé ne possède que 9 sorties.
+
+Ne pas inventer CH11/CH12 : leur fonctionnement n’a pas été établi.
+
+6.  FAIL-SAFE SPCM
+
+Encodage Fail-Safe validé :
+
+-   bit de contrôle AUX = 1 ;
+-   AUX MSB = 1 => données Fail-Safe ;
+-   AUX[3:2] = index du fragment 0..3 ;
+-   AUX[1:0] = successivement FS3:2, FS5:4, FS7:6, FS9:8 ;
+-   FS1:0 sont toujours zéro.
+
+Référence :
+
+uint8_t makeFailsafeAux(uint16_t fs10, uint8_t idx) { fs10 &= 0x03FC;
+uint8_t fs8 = fs10 >> 2; return 0x10 | ((idx & 3) << 2) | ((fs8 >> (2 *
+(idx & 3))) & 3); }
+
+API recherchée pour la bibliothèque : setFailsafeUs(ch, us)
+setFailsafeHold(ch) setFailsafeOff(ch) setAllFailsafeHold()
+
+FS=0 dans l’API signifie HOLD/OFF.
+
+Le Fail-Safe a été validé matériellement sur le banc : - voie normale
+conservée pendant que le RF est présent ; - en perte RF, le récepteur
+applique la position FS programmée.
+
+7.  TABLE SERVICE / AUX DE REFERENCE MC-19
+
+Une nouvelle capture stable de la MC-19 a permis d’établir le cycle réel
+de 8 trames :
+
+AUX1 AUX3 AUX5 AUX7 | AUX2 AUX4 AUX6 AUX8
+
+8 0 20 20 | 20 20 24 24 20 20 24 24 | 8 0 28 28 8 0 28 28 | 24 24 16 16
+24 24 16 16 | 8 0 20 20 8 0 20 20 | 28 28 24 24 28 28 24 24 | 8 0 28 28
+8 0 28 28 | 16 16 16 16 16 16 16 16 | 8 0 20 20
+
+Code :
+
+static const uint8_t Service[8][8] PROGMEM = { { 8, 0,20,20,
+20,20,24,24}, {20,20,24,24, 8, 0,28,28}, { 8, 0,28,28, 24,24,16,16},
+{24,24,16,16, 8, 0,20,20}, { 8, 0,20,20, 28,28,24,24}, {28,28,24,24, 8,
+0,28,28}, { 8, 0,28,28, 16,16,16,16}, {16,16,16,16, 8, 0,20,20} };
+
+Cette table remplace les anciennes tables expérimentales.
+
+IMPORTANT : La V10.6, V10.7b et la branche actuelle utilisent cette
+table MC-19.
+
+8.  TIMING SPCM MESURE
+
+MC-19 : - période typique mesurée : environ 44,025 ms ; - capture
+récente : environ 44,02536 à 44,02538 ms ; - jitter de l’ordre de 0,5 us
+; - SYNC HIGH environ 414 à 415 us.
+
+Tick SPCM : - environ 166,4 us.
+
+Problème sur AVR : Timer1 travaille en demi-microsecondes. 166,4 us =
+332,8 counts Timer1. Cette valeur n’est pas entière.
+
+Il est donc faux de coder chaque tick comme 333 counts en permanence :
+cela crée une erreur systématique.
+
+La solution validée est un accumulateur fractionnaire.
+
+9.  ACCUMULATEUR FRACTIONNAIRE AVR
+
+Référence V10.7b :
+
+static uint16_t GraTickBase = 332U; static uint32_t GraTickRem =
+8000000UL; static uint32_t GraTickFrac = 0;
+
+static inline uint16_t GraNextTickCounts(void) { uint16_t c =
+GraTickBase; uint32_t f = GraTickFrac + GraTickRem;
+
+if(f >= 10000000UL) { f -= 10000000UL; ++c; }
+
+GraTickFrac = f; return c; }
+
+static uint16_t GraTicksCounts(uint8_t ticks) { uint16_t n = 0;
+while(ticks–) n += GraNextTickCounts();
+
+return n; }
+
+Cela produit la bonne moyenne de 332,8 counts par tick.
+
+L’accumulateur est remis à zéro au début de la trame / SYNC dans V10.7b.
+
+Le train de transitions représente exactement 260 ticks SPCM : 260 *
+332,8 = 86528 counts Timer1.
+
+SYNC : environ 415 us = 830 counts.
+
+La branche validée conserve aussi une compensation empirique de fin de
+trame : (SPCM_FRAME_US - 68 us) * 2
+
+Cette compensation ne doit PAS être supprimée simplement parce qu’un
+accumulateur fractionnaire est utilisé. Une tentative antérieure l’avait
+supprimée et avait régressé.
+
+10. EVOLUTION DU BANC PROTOTHREADS
+
+PREMIER BANC
+
+Le premier banc utilisait : - vrai Protothread ; - slicing toutes les
+~128 us ; - double-buffer ; - OC1B D10 ; - construction SPCM ; - buffer
+d’environ 104 durées ; - code 15 réservé au reste de trame.
+
+L’objectif était de se rapprocher de la structure OpenAVRc et non de
+faire un simple générateur bloquant.
+
+V2
+
+Ajout / déplacement des données nécessaires dans PtCtx. Correction d’un
+problème de SYNC au démarrage. Résultat encore incorrect.
+
+V3
+
+Suppression d’une variable locale de buffer qui survivait incorrectement
+à un yield. Le problème venait de la règle fondamentale Protothreads :
+les variables locales automatiques ne sont pas conservées comme dans une
+coroutine classique. Résultat encore incorrect.
+
+V4 — FAKE PT
+
+Essai sans vrai découpage Protothread pour isoler le problème. Le train
+de transitions était réel, mais la période atteignait environ 76,9 ms à
+cause d’un grand trou d’environ 33 ms.
+
+V5 — RETOUR AU VRAI PT
+
+Tous les états devant survivre aux yields sont déplacés dans PtCtx.
+Toujours environ 76,9 ms.
+
+V6
+
+Modification de la programmation OCR pour éliminer une hypothèse de
+retard. Toujours environ 76,9 ms.
+
+V7 — FAKE PT + OCR
+
+Nouvel essai de séparation des causes. Toujours environ 76,9 ms.
+
+V8 — ETAPE MAJEURE
+
+La construction logique a été réellement découpée en petites étapes : -
+BuildLogicalBase ; - yield ; - calcul CRC groupe A ; - yield ; - CRC B
+; - yield ; - CRC C ; - yield ; - CRC D ; - yield ; - conversion logique
+-> physique ; - construction progressive du train de transitions.
+
+Résultat : - période environ 44,0927 ms ; - SYNC environ 414 us ; -
+trames décodables ; - le récepteur accepte enfin le signal ; - servos au
+neutre.
+
+C’est la première validation forte de l’architecture Protothreads.
+
+V9 — AVR DIRECT
+
+Création de : Graupner_SPCM_Uno_Protothread_V9_AVR.zip
+
+Le moteur n’utilise plus les fonctions de timing Arduino dans la partie
+critique. Accès AVR direct. Test automatique : C1 = 1000 -> 1500 -> 2000
+us environ toutes les 2 secondes.
+
+Résultat utilisateur : C1 suit correctement les trois positions.
+
+Cela valide : - le récepteur ; - le builder logique ; - le double-buffer
+; - le vrai Protothread ; - Timer1 / OC1B ; - l’émission matérielle.
+
+V10 — CONSOLE
+
+Ajout des commandes série. Première V10 : erreur de compilation,
+variable FailsafeSpcm absente.
+
+V10.1
+
+Création : Graupner_SPCM_Uno_Protothread_V10_1_CONSOLE.zip
+
+Restauration : static uint16_t FailsafeSpcm[8];
+
+Résultat utilisateur : les servos 1, 3, 4 et 8 répondent.
+
+V10.2
+
+Création : Graupner_SPCM_Uno_Protothread_V10_2_CONSOLE_CH10_FS.zip
+
+Ajouts : - commandes C1..C10 ; - FS1..FS8 ; - mapping CH9 / CH10.
+
+Observation : - Fail-Safe pas encore satisfaisant ; - C4 pouvait
+osciller.
+
+V10.3a
+
+Version diagnostic Fail-Safe. Erreur d’accès à la table Service en
+PROGMEM.
+
+V10.3b
+
+Création : Graupner_SPCM_Uno_Protothread_V10_3b_FS_ONLY.zip
+
+Correction PROGMEM.
+
+Capture après : C1 1000 FS1 1500
+
+Décodage : - 85 trames ; - C1 constant ; - fragments AUX1 correspondant
+bien au FS attendu ; - période encore environ 44,0926 ms ; - SYNC
+environ 413,87 us.
+
+Cela montre que l’encodage FS est correct, mais le timing global reste
+légèrement différent de la MC-19.
+
+V10.4 — CORRECTION TIMING
+
+Création : Graupner_SPCM_Uno_Protothread_V10_4_FS_TIMING.zip
+
+Modification essentielle : const uint32_t frameCounts = (SPCM_FRAME_US -
+68UL) * 2UL;
+
+Résultat : - période environ 44,0246 ms ; - jitter environ 0,5 us ; -
+SYNC environ 414 us ; - FS1 fonctionne réellement sur le récepteur.
+
+Observation restante : après remise du HF, le servo peut parfois mettre
+plusieurs secondes à quitter le Fail-Safe et revenir à la commande
+normale. Plusieurs cycles sont parfois immédiats, puis un cycle peut
+prendre ~10 s.
+
+V10.5 — EEPROM
+
+Création : Graupner_SPCM_Uno_Protothread_V10_5_FS_EEPROM.zip
+
+Ajout d’une mémorisation Fail-Safe avec la bibliothèque Arduino EEPROM.
+
+Cette branche n’est pas préférée : l’utilisateur souhaite, si une EEPROM
+est conservée, utiliser les fonctions / registres AVR natifs plutôt que
+la bibliothèque Arduino EEPROM.
+
+Le redémarrage simultané UNO + HF n’a pas supprimé à lui seul le délai
+de reprise.
+
+V10.6 — TABLE SERVICE MC-19
+
+Création : Graupner_SPCM_Uno_Protothread_V10_6_MC19_SERVICE.zip
+
+Base : V10.4. Modification : uniquement la table Service, remplacée par
+le cycle exact mesuré sur la MC-19.
+
+CH9/CH10 désactivés dans cette branche diagnostic.
+
+Résultat : - Fail-Safe fonctionne ; - la reprise n’est toujours pas
+systématiquement immédiate.
+
+La comparaison montre que la table Service est correcte après alignement
+de phase.
+
+V10.7 — PREMIER ESSAI FRACTIONNAIRE
+
+Création : Graupner_SPCM_Uno_Protothread_V10_7_FRACTIONAL_TICK.zip
+
+But : reproduire 166,4 us avec une accumulation fractionnaire.
+
+Première implémentation : - accumulateur appliqué naïvement aux runs ; -
+suppression de la correction -68 us.
+
+Cette version avait également des erreurs de compilation initiales liées
+à l’ordre des déclarations.
+
+V10.7a
+
+Création : Graupner_SPCM_Uno_Protothread_V10_7a_FRACTIONAL_TICK.zip
+
+Compilation corrigée.
+
+Résultat utilisateur : avec C1=1000, le servo essaye de partir vers
+~1100 puis revient vers 1500, de façon répétée. C1=1500 arrête le
+phénomène.
+
+Conclusion : V10.7/V10.7a sont des régressions et ne doivent PAS servir
+de base.
+
+Cause retenue : - accumulateur fractionnaire appliqué au mauvais niveau
+; - suppression incorrecte de la compensation -68 us.
+
+V10.7b — REFERENCE TEMPORELLE ACTUELLE
+
+Création : Graupner_SPCM_Uno_Protothread_V10_7b_EXACT_AVR_TICK.zip
+
+Cette version repart de V10.6, PAS de V10.7a.
+
+Elle reprend l’algorithme de timing AVR décrit dans le document de
+conception RcSpcmGen : - tick de base 332 counts ; - reste fractionnaire
+0,8 count ; - accumulation exacte ; - conservation de la correction -68
+us ; - Service MC-19 ; - CRC / FS inchangés.
+
+ISR de principe :
+
+if(code == 0) { GraTickFrac = 0; half_us =
+US_TO_PROTO_TICK(SPCM_SYNC_US); } else if(code == 15) { half_us =
+Pcm.RestCounts[Pcm.IsrBufIdx]; } else { half_us = GraTicksCounts(code);
+}
+
+Calcul du reste :
+
+const uint32_t frameCounts = (SPCM_FRAME_US - 68UL) * 2UL;
+
+const uint32_t exactUsedCounts = 830UL + 86528UL;
+
+uint32_t rest = (frameCounts > exactUsedCounts) ? frameCounts -
+exactUsedCounts : 1UL;
+
+Capture UNO V10.7b : - période moyenne ~44,024654 ms ; - écart-type
+~0,476 us ; - minimum 44,024 ms ; - maximum 44,025 ms ; - SYNC ~413-414
+us ; - durées internes montrant bien l’alternance liée au fractionnaire.
+
+Conclusion : le tick fractionnaire fonctionne correctement. Le délai de
+sortie du Fail-Safe subsiste néanmoins. Il ne faut donc plus attribuer
+ce délai à l’arrondi 166,4 -> 166,5 us.
+
+11. COMPARAISON RECENTE UNO / MC-19 AU RETOUR
+
+Configuration de Fail-Safe clarifiée par l’utilisateur : - seul C1 est
+actuellement configuré pour aller à 1000 us en Fail-Safe ; - les autres
+voies ne doivent pas être utilisées comme indicateur visuel de la sortie
+FS.
+
+Capture UNO : le générateur reprend immédiatement son émission après la
+coupure observée. Les trames sont valides. C1 normal est transmis
+normalement. Les fragments FS1=1000 restent correctement annoncés dans
+le cycle AUX/Service.
+
+Cela indique que le générateur lui-même ne reste pas “bloqué en
+Fail-Safe” : le Fail-Safe est une consigne envoyée au module/récepteur,
+pas un remplacement de la valeur de voie normale dans chaque trame.
+
+Capture MC-19 : une différence de démarrage a été observée : après une
+interruption, la MC-19 présente environ 40,05 ms d’état fixe avant le
+début du véritable train SPCM.
+
+Exemple observé : - SPCM arrêté vers 4,321616 s ; - reprise électrique
+vers 6,978285 s ; - environ 40,051 ms d’état fixe ; - véritable train
+SPCM vers 7,018336 s.
+
+Cette observation a motivé V10.8.
+
+12. V10.8 — EXPERIENCE “MC-19 STARTUP”
+
+Archive actuelle :
+Graupner_SPCM_Uno_Protothread_V10_8_MC19_STARTUP_FIXED.zip
+
+Cette version doit rester une expérience séparée.
+
+Base : V10.7b.
+
+Principe : au démarrage du générateur, maintenir la sortie dans l’état
+correspondant au niveau de repos SPCM pendant environ 40,05 ms, puis
+démarrer le moteur V10.7b normalement.
+
+AUCUN changement volontaire dans : - CRC ; - mapping des voies ; - table
+Service ; - Fail-Safe ; - builder logique ; - double-buffer ; -
+accumulateur fractionnaire ; - timing de trame V10.7b après démarrage.
+
+IMPORTANT : ce test n’a d’effet que si le UNO / générateur redémarre.
+
+Si l’utilisateur coupe uniquement l’alimentation du module HF en
+laissant le UNO fonctionner, le UNO ne sait pas que le module HF vient
+d’être réalimenté. Il ne rejouera donc pas automatiquement les 40 ms de
+préambule.
+
+Pour tester correctement cette V10.8 dans sa forme actuelle : démarrer
+UNO + HF ensemble.
+
+Si l’on veut reproduire ce comportement lors d’une simple remise sous
+tension du HF sans redémarrer le UNO, il faudra fournir au UNO une
+information “HF ON” (entrée GPIO, commande, détection de tension via
+circuit adapté, etc.) et déclencher explicitement la séquence de
+resynchronisation.
+
+13. POINT ELECTRIQUE A NE PAS OUBLIER
+
+Le module HF Graupner n’est pas seulement sensible au protocole
+numérique.
+
+Signal SPCM original : environ 0..10 V.
+
+Le banc utilise un transistor BC547 pour l’adaptation de niveau.
+
+Schéma de principe :
+
+             +10 V
+               |
+             4,7 k
+               |
+               +------ SPCM vers module HF
+               |
+               C
+
+GPIO – Rb — B BC547 E | GND ———–+—— GND HF
+
+Le transistor inverse logiquement le GPIO.
+
+Alimentation auxiliaire du module HF : la MC-19 fournit une broche
+nominalement “+6 V”.
+
+Découverte importante : avec l’alimentation de laboratoire limitée à
+environ 60 mA, beaucoup de bruit RF autour de ~35 MHz apparaît sur le
+SPCM et le fonctionnement devient erratique.
+
+Avec une limite de courant de 20 mA : - le fonctionnement devient
+nettement meilleur ; - la tension réelle s’écroule autour de 3,43 V ; -
+commandes et Fail-Safe fonctionnent ; - la reprise peut être de l’ordre
+de quelques secondes.
+
+Ne pas conclure pour l’instant si le paramètre déterminant est : - la
+limite de 20 mA elle-même ; - la tension réelle ~3,43 V ; - ou l’effet
+de cette alimentation sur l’étage RF.
+
+C’est encore à caractériser.
+
+Résistance de base : - 4,7 k testée ; - environ 7,96/8 k obtenue par
+association de résistances ; - 8 k fonctionne lorsque l’alimentation
+auxiliaire HF est limitée à 20 mA.
+
+Les essais électriques doivent être faits sans modifier simultanément le
+logiciel.
+
+14. ECHELLE DES VOIES — POINT A REVERIFIER
+
+Attention : une branche de la bibliothèque RcSpcmGen a utilisé une
+conversion expérimentale basée sur : - 1000 us -> 172 - 1500 us -> 512 -
+2000 us -> 852.
+
+Cette échelle venait d’une interprétation des valeurs Fail-Safe MC-19.
+
+Elle ne doit pas être considérée comme définitivement prouvée pour les
+voies normales.
+
+L’ancienne échelle normale était : - 900 us -> 0 - 1500 us -> ~512 -
+2100 us -> 1023.
+
+Le banc Protothreads a réussi à faire bouger C1 entre 1000, 1500 et
+2000, mais cela ne prouve pas à lui seul la calibration absolue exacte.
+
+Pour finaliser la bibliothèque / OpenAVRc, comparer séparément : -
+captures MC-19 de voies normales ; - captures MC-19 de données
+Fail-Safe.
+
+Ne pas mélanger les deux représentations.
+
+15. CE QUI EST AUJOURD’HUI CONSIDERE COMME VALIDE
+
+Validé : - décodage physique quintet ; - CRC A/B/C/D ; - structure
+logique des 32 quintets ; - voies CH1..CH8 ; - CH9 ; - principe CH10 ; -
+table Service MC-19 actuelle ; - encodage Fail-Safe ; - FS1
+matériellement fonctionnel ; - architecture Protothreads découpée ; -
+double-buffer ; - Timer1 / OC1B ; - émission matérielle sur D10 UNO ; -
+période de trame ~44,025 ms ; - SYNC ~415 us ; - accumulateur
+fractionnaire 332,8 counts/tick ; - V10.7b comme référence de timing.
+
+Encore à résoudre / confirmer : - cause exacte du délai de reprise après
+sortie Fail-Safe / retour HF ; - utilité réelle du préambule ~40 ms de
+V10.8 ; - comportement exact lors d’une simple remise sous tension du HF
+alors que le générateur continue ; - calibration définitive us <->
+valeur SPCM normale ; - CH10 sur sortie physique ; - éventuels CH11/CH12
+; - intégration finale dans le moteur PCM OpenAVRc.
+
+16. REGLES POUR LA SUITE
+
+1)  Ne pas repartir de V10.7 ou V10.7a.
+2)  Conserver V10.7b intact comme référence.
+3)  Traiter V10.8 comme une expérience de startup.
+4)  Ne changer qu’un paramètre à la fois.
+5)  Toujours vérifier les modifications avec l’analyseur logique.
+6)  Comparer les captures UNO avec la MC-19, pas seulement le mouvement
+    des servos.
+7)  Ne pas supprimer la compensation -68 us sans nouvelle preuve.
+8)  Ne pas remplacer l’accumulateur fractionnaire par un simple arrondi
+    à 333 counts.
+9)  Dans les Protothreads, ne jamais dépendre d’une variable locale
+    automatique après un yield.
+10) Pour OpenAVRc, conserver le principe double-buffer + OCR1B relatif.
+11) Ne pas attribuer automatiquement un délai de reprise au protocole :
+    le module HF et son alimentation auxiliaire ont déjà montré une
+    forte influence.
+12) Ne jamais brancher directement le signal SPCM ~10 V sur une entrée 5
+    V/3,3 V ou un analyseur logique non protégé.
+
+17. PROCHAINE EXPERIENCE RECOMMANDEE
+
+Tester V10.8 avec UNO + HF démarrés ensemble.
+
+Comparer : - temps d’acquisition initial ; - entrée en Fail-Safe ; -
+retour de Fail-Safe ; - répétabilité sur plusieurs cycles.
+
+Si le délai reste identique, revenir à V10.7b et considérer le préambule
+40 ms comme non déterminant.
+
+Pour étudier une remise sous tension HF pendant que le UNO reste allumé,
+il faut idéalement : - une deuxième voie d’analyseur logique indiquant
+le moment HF ON, avec adaptation de niveau sûre ; ou - une entrée dédiée
+au UNO pour déclencher une séquence de resynchronisation.
+
+Ensuite comparer image par image / trame par trame : - MC-19 avant HF
+OFF ; - MC-19 premières trames après HF ON ; - UNO mêmes instants ; -
+phase Service/AUX ; - CRC ; - C1 normal ; - fragments FS1 ; - période et
+SYNC.
+
+18. FICHIERS / VERSIONS IMPORTANTES
+
+Références principales : - JR_Graupner_SPCM.pdf - PROTO_PCM.h -
+PROTO_PCM.cpp - RcSpcmGen_AVR_Conception.txt -
+Graupner_SPCM_Protothreads_Compte_Rendu.txt
+
+Bancs successifs importants : -
+Graupner_SPCM_Uno_Protothread_V9_AVR.zip -
+Graupner_SPCM_Uno_Protothread_V10_1_CONSOLE.zip -
+Graupner_SPCM_Uno_Protothread_V10_2_CONSOLE_CH10_FS.zip -
+Graupner_SPCM_Uno_Protothread_V10_3b_FS_ONLY.zip -
+Graupner_SPCM_Uno_Protothread_V10_4_FS_TIMING.zip -
+Graupner_SPCM_Uno_Protothread_V10_5_FS_EEPROM.zip -
+Graupner_SPCM_Uno_Protothread_V10_6_MC19_SERVICE.zip -
+Graupner_SPCM_Uno_Protothread_V10_7_FRACTIONAL_TICK.zip -
+Graupner_SPCM_Uno_Protothread_V10_7a_FRACTIONAL_TICK.zip -
+Graupner_SPCM_Uno_Protothread_V10_7b_EXACT_AVR_TICK.zip -
+Graupner_SPCM_Uno_Protothread_V10_8_MC19_STARTUP_FIXED.zip
+
+REFERENCE A CONSERVER : V10.7b = référence temporelle / protocolaire.
+V10.8 = essai startup MC-19, pas encore validé.
+
+19. RESUME EN UNE PHRASE POUR UN NOUVEAU CHAT
+
+Nous avons maintenant un générateur Graupner/JR SPCM 1024 sur Arduino
+UNO construit selon l’architecture PCM OpenAVRc avec vrais Protothreads,
+construction découpée, double-buffer, Timer1/OC1B D10, CRC validés,
+Service MC-19, Fail-Safe fonctionnel et tick AVR fractionnaire exact ;
+la V10.7b émet à ~44,025 ms et constitue la référence, et la V10.8 teste
+uniquement un état de repos d’environ 40,05 ms au démarrage pour
+comprendre le délai parfois observé lors de la reprise RF après
+Fail-Safe.
+
+20. CONTROLE RAPIDE DU SOURCE V10.8 ACTUEL
+
+L’archive V10.8 actuelle a été relue lors de la création de ce compte
+rendu. Extraits/constantes repérés : #define SPCM_FRAME_US 44025UL
+#define SPCM_SYNC_US 415U static uint16_t GraTickBase = 332U; static
+uint32_t GraTickRem = 8000000UL; const uint32_t frameCounts =
+(SPCM_FRAME_US - 68UL) * 2UL;
+
+======================================================================
+MISE A JOUR FINALE DU 2026-10-03 — V10.9 ET DIAGNOSTIC RECEPTEUR
+======================================================================
+
+Cette section complète le compte rendu précédent et doit être lue comme
+l’état le plus récent du projet.
+
+20. V10.9 — COMMANDE RESTART
+
+Problème rencontré avec V10.8 : Le montage de test utilise plusieurs
+alimentations indépendantes : - Arduino UNO ; - alimentation d’environ
++10 V servant au niveau SPCM ; - alimentation auxiliaire du module HF,
+actuellement utilisée avec limitation de courant autour de 20 mA.
+
+Il est donc impossible de garantir manuellement que le démarrage du UNO
+coïncide exactement avec la mise sous tension réelle du module HF. Le
+préambule d’environ 40,05 ms ajouté au setup() dans V10.8 pouvait être
+terminé avant que le HF soit réellement opérationnel.
+
+Pour rendre l’expérience reproductible, une V10.9 a été créée :
+
+    Graupner_SPCM_Uno_Protothread_V10_9_RESTART.zip
+
+Principe : - conserver les alimentations et le UNO déjà allumés et
+stabilisés ; - envoyer la commande série : RESTART - arrêter proprement
+l’émission Timer1 / OC1B ; - imposer le niveau de repos SPCM ; -
+attendre environ 40,05 ms ; - remettre à zéro la phase Service ; -
+remettre à zéro GraTickFrac ; - réinitialiser le Protothread et les
+buffers nécessaires ; - redémarrer sur un SYNC ; - reprendre ensuite le
+moteur V10.7b normal.
+
+Cette commande permet de tester le comportement “redémarrage SPCM façon
+MC-19” sans avoir à synchroniser physiquement trois alimentations.
+
+Résultat utilisateur : le servo a encore du mal à sortir du Fail-Safe.
+
+Conclusion provisoire : le simple préambule / repos d’environ 40 ms ne
+résout pas le problème de réacquisition. Ne pas continuer à modifier le
+timing sur cette seule hypothèse.
+
+V10.7b reste donc la référence protocolaire et temporelle. V10.9 est un
+outil de diagnostic.
+
+21. SHOW A AMELIORER DANS LA PROCHAINE VERSION
+
+L’utilisateur souhaite retrouver une fonction SHOW claire, similaire aux
+anciennes versions.
+
+Format souhaité :
+
+========== GRAUPNER SPCM 1024 ==========
+
+Channels: C1 = xxxx us C6 = xxxx us C2 = xxxx us C7 = xxxx us C3 = xxxx
+us C8 = xxxx us C4 = xxxx us C9 = xxxx us C5 = xxxx us C10 = xxxx us
+
+Fail-Safe: FS1 = xxxx us ou HOLD … FS8 = xxxx us ou HOLD
+
+SPCM: Frame : ~44.025 ms Sync : ~415 us Service : phase x / 8 Tick :
+166.4 us fractional Output : D10 / OC1B Engine : RUNNING
+
+Restart: Idle time : 40.05 ms état du dernier restart
+
+Commands: C1..C10 FS1..FS8 FS1..FS8 HOLD RESTART SHOW
+
+IMPORTANT : SHOW devra afficher les valeurs réellement mémorisées dans
+le programme et non des exemples constants.
+
+Cette amélioration n’a pas encore été intégrée à V10.9 au moment de ce
+compte rendu.
+
+22. MOUVEMENTS SPONTANES DES SERVOS
+
+Observation importante de l’utilisateur : sans toucher aux manches ni
+envoyer de commande, les servos peuvent parfois bouger.
+
+Une capture SPCM a d’abord été examinée pendant ce phénomène.
+
+Résultat côté SPCM UNO : - environ 143 trames observées ; - période
+extrêmement régulière ; - moyenne approximative : 44,02437 ms ; -
+écart-type approximatif : 0,48 us ; - minimum ~44,024 ms ; - maximum
+~44,025 ms ; - aucun grand trou ; - aucun redémarrage visible ; - aucune
+anomalie temporelle évidente corrélable à un mouvement servo.
+
+Conclusion : les mouvements spontanés ne sont pas expliqués par un
+accident grossier de timing du générateur UNO.
+
+Cela a motivé l’observation directe de la sortie PWM C1 du récepteur.
+
+23. CAPTURES PWM C1 DU RECEPTEUR
+
+Une première capture ne permettait pas d’identifier clairement le PWM
+servo.
+
+Une capture suivante a montré un signal exploitable : - largeur
+d’impulsion autour de 1101-1102 us ; - largeur très stable pendant la
+majeure partie de l’enregistrement ; - périodes d’actualisation
+observées autour de 21,97 ms et 30,86 ms en alternance.
+
+A ce stade, aucune excursion de position n’était visible.
+
+Une capture plus longue a ensuite ATTRAPE LE PHENOMENE.
+
+Vers la fin de cette capture, la sortie C1 du récepteur passe réellement
+d’environ :
+
+    1102 us
+
+à environ :
+
+    1037-1038 us
+
+pendant plusieurs impulsions, puis revient à ~1102 us.
+
+Deux salves distinctes ont été observées.
+
+Exemple relevé autour de ~38,35 s :
+
+    avant : ~1102 us
+
+    ~38.354170 s : 1038 us
+    ~38.376225 s : 1037 us
+    ~38.398196 s : 1038 us
+    ~38.420251 s : 1037 us
+    ~38.442222 s : 1038 us
+
+    puis retour vers ~1102 us.
+
+Une seconde salve apparaît autour de ~38,706 s : plusieurs impulsions
+autour de 1037 us, puis retour vers ~1102 us.
+
+POINT CAPITAL : le mouvement du servo n’est donc pas seulement
+mécanique. Le récepteur lui-même modifie réellement la largeur PWM
+envoyée au servo.
+
+Les valeurs sont propres et répétitives, ce qui ressemble davantage à
+une commutation d’état / information reçue qu’à du bruit aléatoire sur
+le signal PWM.
+
+24. INTERPRETATION ACTUELLE — A NE PAS SURINTERPRETER
+
+Les éléments suivants sont maintenant établis séparément :
+
+A)  Le SPCM généré par le UNO est temporellement très propre dans les
+    captures examinées.
+B)  Le récepteur peut malgré tout modifier brièvement sa sortie C1 sans
+    action utilisateur.
+C)  La sortie C1 a réellement été observée autour de 1102 us puis
+    1037/1038 us puis 1102 us.
+D)  Le module HF et son alimentation auxiliaire ont déjà montré une
+    forte sensibilité électrique et RF.
+E)  Le RESTART avec ~40 ms de repos ne suffit pas à supprimer le
+    problème de sortie du Fail-Safe.
+
+Il n’est PAS encore démontré que : - le récepteur entre formellement en
+Fail-Safe pendant les salves 1037 us ; - le module HF perd effectivement
+la liaison RF au même instant ; - une trame SPCM particulière provoque
+la salve ; - le problème vient uniquement de l’alimentation HF.
+
+Ces points nécessitent une capture simultanée.
+
+25. PROCHAIN TEST PRIORITAIRE
+
+Le prochain test à effectuer est une capture logique simultanée :
+
+    CH0 = SPCM UNO -> module HF
+    CH1 = PWM C1 en sortie du récepteur
+
+Laisser fonctionner sans toucher à rien jusqu’à ce qu’un mouvement
+spontané du servo soit visible.
+
+Ce test permettra de corréler exactement : - chaque trame SPCM émise ; -
+la largeur PWM C1 produite par le récepteur.
+
+Au moment où C1 passe par exemple de ~1102 à ~1037 us, il faudra décoder
+les trames SPCM immédiatement avant, pendant et après.
+
+Deux cas principaux :
+
+CAS 1 : SPCM ne change pas de manière anormale alors que PWM C1 change.
+=> forte indication que le phénomène apparaît après le générateur SPCM :
+module HF, liaison RF, récepteur, alimentation ou interprétation
+interne.
+
+CAS 2 : une différence SPCM reproductible apparaît exactement avec le
+changement PWM. => rechercher le champ responsable : voie C1,
+Service/AUX, fragments Fail-Safe, CRC, phase de cycle, etc.
+
+Cette capture simultanée est actuellement le test le plus important.
+Eviter de modifier le moteur avant de l’avoir réalisée.
+
+26. PRECAUTION DE MESURE
+
+Le SPCM vers le module HF est un signal de niveau élevé, historiquement
+autour de 0..10 V.
+
+Ne pas connecter directement un analyseur logique 3,3/5 V sur ce signal
+sans adaptation appropriée.
+
+Utiliser le point logique sûr déjà employé dans les captures
+précédentes, ou un pont diviseur / adaptation correcte.
+
+Pour la sortie PWM C1 du récepteur, vérifier également le niveau logique
+avant connexion.
+
+Si un oscilloscope de table est utilisé, se rappeler que les masses des
+voies sont généralement communes et reliées à la terre : deux pinces de
+masse peuvent relier électriquement deux masses que l’on croyait
+séparées.
+
+27. ETAT EXACT A REPRENDRE DANS UN NOUVEAU CHAT
+
+Référence logiciel : V10.7b =
+Graupner_SPCM_Uno_Protothread_V10_7b_EXACT_AVR_TICK C’est la référence
+du moteur validé.
+
+Diagnostic : V10.9 = Graupner_SPCM_Uno_Protothread_V10_9_RESTART Ajoute
+la commande RESTART avec repos ~40,05 ms. Le RESTART n’a pas supprimé le
+délai de sortie du Fail-Safe.
+
+Ne pas utiliser comme nouvelle base : V10.7 V10.7a
+
+V10.8 : expérience de startup physique, rendue peu pratique par les
+trois alimentations indépendantes.
+
+Prochaine évolution éventuelle : conserver le moteur V10.7b/V10.9 intact
+; améliorer SHOW ; ne pas changer Service/CRC/timing avant la capture
+simultanée SPCM + PWM récepteur.
+
+28. RESUME TECHNIQUE FINAL POUR REPRISE IMMEDIATE
+
+Le projet dispose maintenant d’un générateur Graupner/JR SPCM 1024
+Arduino UNO utilisant une architecture proche du moteur PCM OpenAVRc :
+vrais Protothreads, construction de trame découpée, contexte persistant
+PtCtx, double-buffer, Timer1 prescaler /8, sortie matérielle OC1B/D10 et
+programmation OCR1B relative.
+
+Le protocole logique a été décodé : - 32 quintets ; - table physique
+validée ; - CRC 0x31 / 0x13 / 0x91 / 0x19 ; - CH1..CH8 établis ; - CH9
+validé ; - CH10 proposé ; - Service/AUX MC-19 mesuré sur cycle de 8
+trames ; - Fail-Safe fragmenté sur AUX et validé matériellement.
+
+Le problème du tick 166,4 us sur Timer1 2 MHz est résolu dans V10.7b par
+un accumulateur 332 + fraction 0,8 count. La compensation empirique -68
+us est conservée. Les captures UNO donnent environ 44,0246 ms, très
+proches de la MC-19 à ~44,0254 ms, avec un jitter inférieur à la
+microseconde.
+
+Le Fail-Safe fonctionne, mais le récepteur peut mettre du temps à
+reprendre après retour RF. Un préambule MC-19 d’environ 40,05 ms a été
+testé via V10.8 puis de façon reproductible avec RESTART dans V10.9 ;
+cela n’a pas supprimé le problème.
+
+Enfin, un phénomène crucial a été capturé directement sur la sortie C1
+du récepteur : sans commande utilisateur, le PWM peut passer brièvement
+d’environ 1102 us à 1037/1038 us pendant deux salves de plusieurs
+impulsions, puis revenir à 1102 us. Le SPCM UNO observé séparément reste
+très régulier.
+
+La priorité absolue pour la reprise est donc : CAPTURER SIMULTANEMENT
+SPCM UNO ET PWM C1 RECEPTEUR et corréler les salves PWM avec les trames
+SPCM correspondantes avant toute nouvelle modification du protocole.

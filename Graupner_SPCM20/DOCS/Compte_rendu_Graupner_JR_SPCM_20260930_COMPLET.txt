@@ -1,0 +1,839 @@
+================================================================================
+COMPTE RENDU COMPLET — GRAUPNER / JR SPCM 1024
+REVERSE ENGINEERING, GÉNÉRATION ESP32-S3, VALIDATION HF, CH1 À CH10, RCUL
+================================================================================
+
+Date de mise à jour : 30/09/2026
+But de ce fichier : permettre de reprendre le projet dans un nouveau chat sans
+perdre les découvertes, corrections, validations matérielles et fichiers de
+référence.
+
+Ce document reprend et actualise les deux comptes rendus précédents. En cas de
+contradiction avec une ancienne note, les informations marquées VALIDÉES ici
+sont à considérer comme les plus récentes.
+
+================================================================================
+1. OBJECTIF DU PROJET
+================================================================================
+
+Recréer par logiciel le protocole Graupner/JR SPCM 1024 afin qu'un
+microcontrôleur puisse remplacer le codeur d'origine et attaquer directement
+l'entrée SPCM d'un module HF Graupner/JR.
+
+Chaîne réellement testée :
+
+    ESP32-S3
+       |
+       | GPIO1 + adaptation de niveau BC547
+       v
+    SPCM ~0..10 V
+       |
+       v
+    module HF Graupner MC-19
+       |
+       | RF
+       v
+    récepteur Graupner SPCM
+       |
+       v
+    servo
+
+Cette chaîne a été VALIDÉE EN VRAI : le récepteur se synchronise et les servos
+répondent aux commandes générées par l'ESP32-S3.
+
+Objectif logiciel :
+- sketch console de référence permettant l'étude du protocole ;
+- bibliothèque RcSpcmGen avec intégration RCUL ;
+- compatibilité source ESP32 et AVR souhaitée ;
+- éventuellement, plus tard, génération totalement asynchrone ;
+- futur décodeur/récepteur SPCM possible, mais non prioritaire.
+
+================================================================================
+2. MATÉRIEL ET BROCHAGE ACTUEL
+================================================================================
+
+Plateforme de validation :
+    ESP32-S3
+
+Sortie logique :
+    GPIO 1
+
+Le signal logique 3,3 V de l'ESP32 ne doit PAS être relié directement à
+l'entrée SPCM du module HF, car le signal original MC-19 est voisin de 10 V.
+
+Adaptateur validé :
+
+                 +10 V
+                   |
+                 4.7 k
+                   |
+                   +---------- SPCM vers module HF
+                   |
+                   C
+    GPIO1 --4.7k-- B   BC547
+                   E
+                   |
+    GND ESP32 -----+---------- GND HF
+
+Le BC547 inverse le niveau logique. Le logiciel compense cette inversion.
+
+Principe :
+    GPIO LOW  -> BC547 bloqué     -> SPCM HIGH ~10 V
+    GPIO HIGH -> BC547 conducteur -> SPCM LOW ~0 V
+
+Helper utilisé dans le générateur ESP32 :
+
+    static inline void spcmWrite(bool level)
+    {
+        gpio_set_level((gpio_num_t)SPCM_PIN, level ? 0 : 1);
+    }
+
+================================================================================
+3. CONNECTEUR DU MODULE HF MC-19 : DÉCOUVERTE IMPORTANTE
+================================================================================
+
+Le module HF utilisé provient d'une Graupner MC-19.
+PCB observé : MCB049RF.
+
+Le connecteur comporte QUATRE connexions importantes :
+
+    +10 V  : alimentation HF
+    GND    : masse
+    SPCM   : signal modulation/données ~0..10 V
+    +6 V   : alimentation/bias auxiliaire nécessaire au module HF
+
+La quatrième broche a été mesurée côté MC-19, module débranché :
+
+    environ +6.031 V continu
+
+Lors du premier montage autonome ESP32, cette broche +6 V avait été laissée
+flottante. Le signal SPCM était correct mais le module HF ne fonctionnait pas
+normalement.
+
+Après alimentation correcte de cette broche en +6 V :
+    - le module HF fonctionne ;
+    - le récepteur se synchronise ;
+    - le servo répond ;
+    - C1 1000 / C1 2000 produisent le déplacement attendu.
+
+C'est une validation matérielle majeure du générateur.
+
+================================================================================
+4. SOURCE DOCUMENTAIRE ET CAPTURES
+================================================================================
+
+Document de référence :
+    "JR/Graupner SPCM Data Format"
+
+Auteurs :
+    Shaul Eizikovich
+    Michel Kuenemann
+
+Le document s'appuie également sur des travaux antérieurs de :
+    Tsutomu Seki
+
+Capture Graupner originale principale :
+    spcm_1324.csv
+
+Caractéristiques :
+    33 737 transitions
+    durée ~23,96 s
+    544 synchronisations
+    543 trames complètement décodables
+
+Les voies avaient été déplacées :
+    CH1 -> CH3 -> CH2 -> CH4
+
+Captures importantes du générateur :
+    read_spcm5.csv
+    read_spcm6.csv
+    digital(3).csv
+
+Captures supplémentaires voies hautes :
+    digital(6).csv : CH9 déplacée
+    10.csv / 10(1).csv : CH10
+    11.csv / 11(1).csv : étude commande/voie 11 de la radio
+    12.csv : étude commande/voie 12 de la radio
+
+================================================================================
+5. STRUCTURE LOGIQUE SPCM
+================================================================================
+
+Une trame logique contient :
+
+    32 quintets
+    32 x 5 = 160 bits logiques
+
+Organisation :
+    Groupe A : q0  ... q7
+    Groupe B : q8  ... q15
+    Groupe C : q16 ... q23
+    Groupe D : q24 ... q31
+
+Chaque groupe contient :
+    6 quintets de données = 30 bits
+    2 quintets CTRL       = 10 bits
+
+Chaque quintet est converti en un octet physique :
+    32 x 8 = 256 bits physiques
+
+================================================================================
+6. MAPPING VALIDÉ DES VOIES CH1 À CH8
+================================================================================
+
+Les huit voies principales sont des valeurs absolues 10 bits :
+
+    CH1 = q16 * 32 + q17
+    CH2 = q1  * 32 + q2
+    CH3 = q19 * 32 + q20
+    CH4 = q4  * 32 + q5
+    CH5 = q24 * 32 + q25
+    CH6 = q9  * 32 + q10
+    CH7 = q27 * 32 + q28
+    CH8 = q12 * 32 + q13
+
+Les CTRL sont :
+
+    CTRL A = q6  * 32 + q7
+    CTRL B = q14 * 32 + q15
+    CTRL C = q22 * 32 + q23
+    CTRL D = q30 * 32 + q31
+
+================================================================================
+7. CHAMPS AUX
+================================================================================
+
+Positions :
+
+    q0  = AUX1
+    q18 = AUX2
+    q3  = AUX3
+    q21 = AUX4
+    q8  = AUX5
+    q26 = AUX6
+    q11 = AUX7
+    q29 = AUX8
+
+Les AUX sont multiplexés. Ils peuvent contenir :
+    - voies supplémentaires 8 bits ;
+    - informations de service ;
+    - mises à jour relatives ;
+    - éléments liés au Fail-Safe.
+
+IMPORTANT :
+Les valeurs 16, 20, 24, 28 observées dans la séquence de service ne doivent
+pas être écrasées arbitrairement.
+
+================================================================================
+8. CH9 — DÉCODÉE ET VALIDÉE SUR LE VRAI RÉCEPTEUR
+================================================================================
+
+La capture digital(6).csv a permis d'identifier CH9.
+
+CH9 est une voie supplémentaire codée sur 8 bits.
+
+Emplacement principal :
+
+    AUX1 = q0 : nibble haut CH9, bits 7..4
+    AUX3 = q3 : nibble bas  CH9, bits 3..0
+
+Donc :
+
+    CH9_8bit = (q0 << 4) | q3
+
+lorsque q0 et q3 correspondent au créneau CH9.
+
+Découverte intéressante :
+la V5 contenait déjà périodiquement :
+
+    q0 = 8
+    q3 = 0
+
+soit :
+
+    0x80 = 128
+
+La V5 maintenait donc involontairement CH9 au neutre.
+
+Conversion utilisée pour les voies supplémentaires 8 bits :
+
+     900 us ->   0
+    1500 us -> 128 environ
+    2100 us -> 255
+
+La V6 a rendu CH9 commandable par :
+
+    C9 1000
+    C9 1500
+    C9 2000
+
+TEST MATÉRIEL :
+    CH9 fonctionne réellement sur le récepteur.
+
+Cette partie est VALIDÉE.
+
+================================================================================
+9. CH10 — DÉCODÉE, INTÉGRÉE DANS V7
+================================================================================
+
+Les captures CH10 confirment le second canal supplémentaire 8 bits.
+
+Emplacement principal :
+
+    AUX2 = q18 : nibble haut CH10, bits 7..4
+    AUX4 = q21 : nibble bas  CH10, bits 3..0
+
+Donc :
+
+    CH10_8bit = (q18 << 4) | q21
+
+lorsque q18 et q21 correspondent au créneau de voie supplémentaire.
+
+Exemple observé :
+
+    q18 = 2
+    q21 = 10
+
+donne :
+
+    0x2A = 42
+
+Le principe est donc identique à CH9.
+
+La spécification indique également des emplacements de secours :
+    CH9  : AUX1/AUX3, secours AUX5/AUX7
+    CH10 : AUX2/AUX4, secours AUX6/AUX8
+
+Dans notre générateur simple V7, on conserve la séquence Service existante et
+on remplace seulement les vrais créneaux CH10 lorsque :
+
+    q18 < 16 && q21 < 16
+
+Ainsi les valeurs de service 16/20/24/28 restent intactes.
+
+Commandes V7 :
+
+    C10 1000
+    C10 1500
+    C10 2000
+
+NOTE DE VALIDATION :
+CH10 est décodée et implémentée dans V7. Si le test servo CH10 n'a pas encore
+été effectué au moment de la reprise, il reste à faire avant de déclarer CH10
+validée matériellement au même niveau que CH9.
+
+================================================================================
+10. À PROPOS DES "VOIES" 11 ET 12
+================================================================================
+
+Les captures 11 et 12 ont été étudiées.
+
+Ne PAS supposer :
+    CH11 = une simple paire AUX
+    CH12 = une simple paire AUX
+
+Le format SPCM documenté et notre décodage établissent clairement :
+    - 8 voies principales 10 bits CH1..CH8 ;
+    - 2 voies supplémentaires 8 bits CH9 et CH10.
+
+Les variations observées lorsque les commandes 11/12 de la MC-19 sont
+manipulées passent dans la partie multiplexée/service/relative du protocole.
+
+À ce stade :
+    - ne pas ajouter C11/C12 en inventant un mapping ;
+    - ne pas écraser AUX5/AUX7 ou AUX6/AUX8 arbitrairement ;
+    - poursuivre uniquement si l'on souhaite reverse-engineerer le mécanisme
+      relatif complet.
+
+================================================================================
+11. CONVERSION CH1 À CH8 : MICROSECONDES -> 10 BITS
+================================================================================
+
+Plage retenue :
+
+     900 us ->    0
+    1500 us -> ~512
+    2100 us -> 1023
+
+Fonction :
+
+    if (us <= 900) return 0;
+    if (us >= 2100) return 1023;
+    return ((uint32_t)(us - 900) * 1023UL + 600UL) / 1200UL;
+
+Exemples :
+
+     900 ->    0
+    1000 ->   85
+    1250 ->  298
+    1500 ->  512
+    1750 ->  725
+    2000 ->  938
+    2100 -> 1023
+
+================================================================================
+12. CRC : DÉCOUVERTE ET VALIDATION
+================================================================================
+
+Chaque CTRL fait 10 bits :
+
+    bits 9..8 : ctrlHigh / contrôle AUX
+    bits 7..0 : CRC
+
+Le CRC protège exactement :
+    six quintets = 30 bits
+    + les 2 bits hauts du CTRL
+    = 32 bits
+
+CRC-8 :
+    traitement MSB-first
+    init   = 0x00
+    xorout = 0x00
+
+Polynômes :
+
+    CTRL A : 0x31
+    CTRL B : 0x13
+    CTRL C : 0x91
+    CTRL D : 0x19
+
+Validation capture originale :
+
+    543 trames x 4 CTRL
+    = 2172 CRC validés
+
+Fonction :
+
+    uint8_t spcmCrc8(const uint8_t data[4], uint8_t poly)
+    {
+        uint8_t crc = 0;
+        for (uint8_t n=0; n<4; n++) {
+            crc ^= data[n];
+            for (uint8_t bit=0; bit<8; bit++) {
+                if (crc & 0x80)
+                    crc = (uint8_t)((crc << 1) ^ poly);
+                else
+                    crc <<= 1;
+            }
+        }
+        return crc;
+    }
+
+CTRL final :
+
+    ctrl = ((ctrlHigh & 3) << 8) | crc
+
+puis :
+
+    qCtrlHi = (ctrl >> 5) & 0x1F
+    qCtrlLo = ctrl & 0x1F
+
+================================================================================
+13. TABLE QUINTET -> OCTET PHYSIQUE
+================================================================================
+
+Table VALIDÉE :
+
+    static const uint8_t QuintetToPhysical[32] = {
+      0x01,0x44,0x50,0x48,0x14,0x24,0x54,0x28,
+      0x0A,0x42,0x09,0x41,0x12,0x22,0x11,0x21,
+      0x02,0x04,0x40,0x20,0x51,0x08,0x52,0x10,
+      0x45,0x25,0x05,0x15,0x49,0x29,0x4A,0x2A
+    };
+
+Correction historique importante :
+    0x0A -> quintet 0x08
+et NON :
+    0x0B -> quintet 0x08
+
+Après cette correction :
+    543/543 trames originales ont une table physique valide.
+
+================================================================================
+14. TIMING PHYSIQUE
+================================================================================
+
+Tick original :
+    environ 166,4 us
+
+SYNC HIGH :
+    environ 415 us
+
+Période Graupner :
+    environ 44,025 ms
+
+Valeurs baseline :
+
+    FRAME_US = 44025
+    SYNC_US  = 415
+
+Le moteur V5 utilise des échéances absolues et non une accumulation de délais
+relatifs.
+
+Exemple de conversion tick :
+
+    ((uint32_t)ticks * 1664UL + 5UL) / 10UL
+
+================================================================================
+15. TERMINAISON PHYSIQUE V5 — NE PAS MODIFIER
+================================================================================
+
+C'est un point critique découvert sur la capture réelle.
+
+La terminaison dépend de la parité du nombre de bits physiques à 1.
+
+Nombre de 1 PAIR :
+
+    tick 258 -> HIGH
+    tick 260 -> LOW
+
+Nombre de 1 IMPAIR :
+
+    tick 260 -> LOW
+
+Puis repos LOW jusqu'à la synchro suivante.
+
+Cette correction a supprimé les erreurs de CTRL D observées avec les versions
+antérieures.
+
+RÈGLE :
+Ne pas simplifier cette terminaison sans nouvelle capture ou preuve matérielle.
+
+================================================================================
+16. SÉQUENCE SERVICE / AUX ACTUELLE
+================================================================================
+
+La table corrigée utilisée dans la baseline récente est :
+
+    static const uint8_t Service[8][8] =
+    {
+        {28,28,24,24, 8, 0,28,28},
+        { 8, 0,28,28,16,16,16,16},
+        {16,16,16,16, 8, 0,20,20},
+        { 8, 0,20,20,20,20,24,24},
+        {20,20,24,24, 8, 0,28,28},
+        { 8, 0,28,28,24,24,16,16},
+        {24,24,16,16, 8, 0,20,20},
+        { 8, 0,20,20,28,28,24,24}
+    };
+
+Ordre des colonnes :
+
+    q0, q3, q8, q11, q18, q21, q26, q29
+
+Cette table est plus récente que l'ancienne table figurant dans certains
+comptes rendus du 28/09.
+
+CH9 et CH10 sont injectées uniquement dans les créneaux reconnus comme valeurs
+8 bits, sans détruire les autres valeurs de service.
+
+================================================================================
+17. VALIDATIONS ANALYSEUR
+================================================================================
+
+Capture originale spcm_1324.csv :
+    544 synchros
+    543 trames complètes
+    CRC : 2172/2172
+
+read_spcm5.csv :
+    134 trames complètes
+    table physique : 134/134
+    CRC A : 134/134
+    CRC B : 134/134
+    CRC C : 134/134
+    CRC D : 134/134
+    total : 536/536
+
+read_spcm6.csv :
+    durée ~10,629 s
+    241 synchros
+    240 trames complètes
+    table physique : 240/240
+    CRC A-D : 240/240 chacun
+    total : 960/960
+    SYNC ~415 us
+    période ~44,041 ms
+
+digital(3).csv après correction BC547 :
+    122 synchros environ
+    121/121 trames complètes valides
+    table physique valide
+    CRC A/B/C/D valides
+    tick ~166,44 us
+    période ~44,041 ms
+
+================================================================================
+18. VALIDATION RÉELLE HF / RÉCEPTEUR
+================================================================================
+
+Cette étape est maintenant franchie.
+
+Après :
+    - adaptation de niveau BC547 ;
+    - signal SPCM ~10 V ;
+    - alimentation +10 V correcte ;
+    - masse commune ;
+    - restauration de la broche auxiliaire +6 V du module HF ;
+
+le véritable module HF Graupner émet correctement.
+
+Le récepteur Graupner SPCM se synchronise.
+
+Tests :
+    C1 1000
+    C1 2000
+
+=> servo déplacé correctement.
+
+CH9 :
+    C9 1000 / 1500 / 2000
+
+=> fonctionnement réel confirmé.
+
+C'est la preuve que la structure, les CRC, la couche physique et le principe
+AUX CH9 sont acceptés par le matériel Graupner réel.
+
+================================================================================
+19. SÉCURITÉ ANALYSEUR / OSCILLOSCOPE
+================================================================================
+
+Ne jamais appliquer directement ~10 V à un analyseur logique limité à 5 V.
+
+Diviseur utilisé/recommandé :
+
+    SPCM ~10V ---- 15k ----+---- entrée analyseur
+                           |
+                          10k
+                           |
+    GND -------------------+---- GND analyseur
+
+Un oscilloscope de table possède généralement des masses de sondes communes et
+référencées à la terre. Ne pas connecter deux pinces de masse sur des points de
+potentiel différent.
+
+================================================================================
+20. SKETCHS DE RÉFÉRENCE
+================================================================================
+
+Baseline physique historique :
+    SPCM_ESP32S3_TestConsole_V5_BC547.ino
+
+V6 :
+    SPCM_ESP32S3_TestConsole_V6_CH9.ino
+
+État :
+    CH9 ajoutée et VALIDÉE matériellement.
+
+V7 actuelle :
+    SPCM_ESP32S3_TestConsole_V7_CH10.ino
+
+État :
+    CH1..CH8 : fonctionnement de base validé
+    CH9      : implémentée et validée sur récepteur
+    CH10     : implémentée d'après captures et format SPCM
+    CH11/12  : volontairement NON implémentées
+
+Commandes V7 :
+
+    C1 1000
+    ...
+    C8 1750
+    C9 1000
+    C10 1000
+
+    SHOW
+    N
+    HELP
+
+N :
+    remet CH1..CH10 à 1500 us.
+
+================================================================================
+21. BIBLIOTHÈQUE RcSpcmGen
+================================================================================
+
+Une première bibliothèque a été créée.
+
+Version de référence actuelle :
+    RcSpcmGen v0.1.1
+
+IMPORTANT :
+L'intégration RCUL a été corrigée pour suivre l'architecture de la bibliothèque
+RculPWMGen fournie comme référence.
+
+RcSpcmGen dérive directement de Rcul.
+
+Principe attendu :
+
+    class RcSpcmGen... : public Rcul
+
+Méthodes RCUL intégrées :
+
+    RculIsSynchro(...)
+    RculSetWidth_us(...)
+    RculGetWidth_us(...)
+
+Le point important est que RculIsSynchro() participe au service du générateur,
+comme dans RculPWMGen, via refresh().
+
+Architecture retenue :
+
+    uint8_t refresh(uint8_t force = 0);
+
+et, pour les sketches Arduino ordinaires :
+
+    process()
+
+peut rester un alias pratique de refresh().
+
+RculSetWidth_us(width, ch) doit mettre à jour directement la voie SPCM.
+RculGetWidth_us(ch) retourne la consigne courante.
+
+La bibliothèque dépend de :
+    Rcul
+
+library.properties :
+    depends=Rcul
+
+ATTENTION :
+La bibliothèque RcSpcmGen v0.1.1 a été créée avant la finalisation CH9/CH10.
+Ne pas considérer automatiquement CH9/CH10 comme intégrées dans cette version
+sans vérifier son code. La V7 console est actuellement la référence la plus
+récente pour le codage CH9/CH10.
+
+================================================================================
+22. RÉFÉRENCE RCUL : RculPWMGen
+================================================================================
+
+La bibliothèque RculPWMGen a servi de modèle d'architecture RCUL.
+
+Elle dérive de :
+
+    class RculPWMGen : public Rcul
+
+et implémente nativement :
+
+    virtual uint8_t  RculIsSynchro(...)
+    virtual void     RculSetWidth_us(...)
+    virtual uint16_t RculGetWidth_us(...)
+
+Dans RculPWMGen, RculIsSynchro() appelle refresh().
+
+La philosophie à conserver pour RcSpcmGen est donc :
+    RCUL intégré dans la classe elle-même,
+et NON :
+    un simple pointeur/adaptateur Rcul externe.
+
+================================================================================
+23. CE QUI EST VALIDÉ AU 30/09/2026
+================================================================================
+
+[OK] structure 32 quintets
+[OK] mapping CH1..CH8
+[OK] valeurs absolues 10 bits
+[OK] conversion 900..2100 us
+[OK] quatre CTRL
+[OK] quatre CRC
+[OK] table quintet -> physique
+[OK] 256 bits physiques
+[OK] tick ~166,4 us
+[OK] SYNC ~415 us
+[OK] période ~44,025 ms nominale
+[OK] terminaison paire/impaire V5
+[OK] sortie ESP32-S3 GPIO1
+[OK] inversion BC547
+[OK] niveau SPCM ~10 V
+[OK] alimentation +6 V auxiliaire du module HF identifiée
+[OK] émission HF réelle
+[OK] synchronisation véritable récepteur Graupner
+[OK] commande réelle servo
+[OK] CH9 décodée
+[OK] CH9 implémentée
+[OK] CH9 validée sur le récepteur
+[OK] CH10 décodée
+[OK] CH10 intégrée dans V7
+[OK] architecture RCUL corrigée sur modèle RculPWMGen
+
+================================================================================
+24. CE QUI RESTE À VALIDER / À FAIRE
+================================================================================
+
+[ ] test matériel définitif CH10 sur sortie 10 du récepteur, si non encore fait
+[ ] éventuellement comprendre en détail l'activité liée aux commandes 11/12
+[ ] mécanisme complet des mises à jour relatives
+[ ] Fail-Safe SPCM complet
+[ ] reporter CH9/CH10 de V7 dans RcSpcmGen après validation
+[ ] génération réellement asynchrone si nécessaire
+[ ] validation AVR réelle
+[ ] éventuel RculSpcmRead
+
+Ces points ne sont PAS nécessaires pour conserver la baseline actuelle
+fonctionnelle CH1..CH9, et probablement CH1..CH10 après le test CH10.
+
+================================================================================
+25. RÈGLES IMPORTANTES POUR UNE REPRISE DANS UN NOUVEAU CHAT
+================================================================================
+
+1. Ne PAS repartir de zéro sur le CRC.
+   Les quatre polynômes sont trouvés et validés.
+
+2. Ne PAS modifier la table physique sans preuve.
+   La correction 0x0A -> quintet 0x08 est importante.
+
+3. Ne PAS simplifier la terminaison V5.
+   Les ticks 258/260 et la parité sont essentiels.
+
+4. Ne PAS revenir à un signal 3,3 V directement vers le HF.
+   Le montage réel utilise un collecteur BC547 et un pull-up ~10 V.
+
+5. Ne PAS oublier la broche +6 V du module HF.
+   Elle est indispensable au fonctionnement réel observé.
+
+6. Pour CH9 :
+       q0/q3 = AUX1/AUX3
+   codage 8 bits, validé réellement.
+
+7. Pour CH10 :
+       q18/q21 = AUX2/AUX4
+   codage 8 bits, décodé et intégré dans V7.
+
+8. Ne PAS inventer CH11/CH12 en utilisant simplement AUX5..AUX8.
+   Ces champs participent au multiplexage/service/relatif.
+
+9. La table Service récente à utiliser est celle donnée dans la section 16 de
+   CE document, pas nécessairement celle des anciens comptes rendus.
+
+10. Pour RCUL, suivre RculPWMGen :
+    héritage direct de Rcul + méthodes virtuelles intégrées + refresh().
+
+11. La référence la plus récente du générateur console est :
+       SPCM_ESP32S3_TestConsole_V7_CH10.ino
+
+12. La bibliothèque RcSpcmGen v0.1.1 est une étape antérieure à l'intégration
+    définitive CH9/CH10. Mettre à jour la bibliothèque seulement après validation
+    réelle de CH10.
+
+================================================================================
+26. PROCHAINE ÉTAPE CONSEILLÉE
+================================================================================
+
+Tester V7 avec un servo sur la sortie CH10 du véritable récepteur :
+
+    C10 1000
+    C10 1500
+    C10 2000
+
+Si le mouvement est correct :
+
+    CH1..CH10 = ensemble fonctionnel validé
+
+Ensuite :
+    - figer V7 comme baseline CH1..CH10 ;
+    - porter le codage CH9/CH10 dans RcSpcmGen ;
+    - incrémenter la version de la bibliothèque ;
+    - ne poursuivre CH11/12 que si un besoin réel existe.
+
+================================================================================
+FIN — COMPTE RENDU DE REPRISE COMPLET
+================================================================================
